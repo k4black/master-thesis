@@ -17,13 +17,9 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
+pythonpath = "."
 minversion = "6.0"
-python_files = "test_*.py"
-addopts = "--cov=checker/ --cov-report=term-missing --cov-report=xml tests/"
-testpaths = [
-    "tests",
-    ".tmp"
-]
+addopts = "--cov=adaptive_pruning/ --cov-report=term-missing --cov-report=xml"
 
 
 [tool.ruff]
@@ -75,7 +71,7 @@ line_length = 120
 lines_after_imports = 2
 combine_as_imports = true
 default_section = "THIRDPARTY"
-known_first_party = "checker,tests"
+known_first_party = "adaptive_pruning,tests"
 
 [tool.black]
 line-length = 120

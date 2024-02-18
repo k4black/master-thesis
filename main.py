@@ -11,24 +11,25 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
-    PreTrainedModel,
+    PreTrainedModel, PreTrainedTokenizer,
 )
 from transformers.pytorch_utils import prune_linear_layer
 from tokenizers import Tokenizer
-from datasets import load_dataset, Dataset, DatasetDict
+from datasets import load_dataset, DatasetDict
 from torch.utils.data import DataLoader
 from evaluate import load
 from tqdm import tqdm
-from torchinfo import summary
 from torch.utils.hooks import RemovableHandle
 
+from adaptive_pruning.pruning import prune_attention_heads, prune_ffn_neurons, prune_ffn_layers, prune_attention_layers
+
+
+CUDA_DEVICES = [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else []
 IS_TPU_AVAILABLE = torch.cuda.is_available() and "TPU" in torch.cuda.get_device_name(0)
 IS_CUDA_AVAILABLE = torch.cuda.is_available() and not IS_TPU_AVAILABLE
 IS_FP16_AVAILABLE = IS_CUDA_AVAILABLE
 # IS_BF16_AVAILABLE = IS_CUDA_AVAILABLE and torch.backends.cuda.is_bf16_supported
-print(
-    f"all devices: {[torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else []}"
-)
+print(f"CUDA_DEVICES: {CUDA_DEVICES}")
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
 print(f"FP16_AVAILABLE: {IS_FP16_AVAILABLE}")
 # print(f"BF16_AVAILABLE: {IS_BF16_AVAILABLE}")
@@ -38,7 +39,7 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 
-def load_glue_dataset(task_name: str, tokenizer: Tokenizer) -> DatasetDict:
+def load_glue_dataset(task_name: str, tokenizer: PreTrainedTokenizer) -> DatasetDict:
     text_1, text_2 = {
         "cola": ("sentence", None),
         "mnli": ("premise", "hypothesis"),
@@ -64,7 +65,7 @@ def load_glue_dataset(task_name: str, tokenizer: Tokenizer) -> DatasetDict:
             max_length=tokenizer.model_max_length,
         )
 
-    dataset = dataset.map(
+    tokenized_dataset = dataset.map(
         _tokenize,
         batched=True,
         load_from_cache_file=True,
@@ -73,14 +74,14 @@ def load_glue_dataset(task_name: str, tokenizer: Tokenizer) -> DatasetDict:
 
     if task_name == "mnli":
         # rename splits for MNLI
-        dataset["validation"] = dataset["validation_matched"]
-        dataset["test"] = dataset["test_matched"]
-        del dataset["validation_matched"], dataset["test_matched"]
+        tokenized_dataset["validation"] = tokenized_dataset["validation_matched"]
+        tokenized_dataset["test"] = tokenized_dataset["test_matched"]
+        del tokenized_dataset["validation_matched"], tokenized_dataset["test_matched"]
 
-    return dataset
+    return tokenized_dataset
 
 
-def measure_metric(
+def measure_glue_metric(
     model: PreTrainedModel,
     dataloader: DataLoader,
     task_name: str,
@@ -88,7 +89,8 @@ def measure_metric(
     # load metric
     is_single_label = model.num_labels == 1
     metric = load("glue", task_name, trust_remote_code=True)
-    target_metric_name = {
+    # TODO: check if this is correct
+    target_metric_name: str = {
         "cola": "matthews_correlation",
         "mnli": "accuracy",
         "mrpc": "accuracy",
@@ -395,38 +397,21 @@ def main(
     print("-" * 80)
 
     # measure before metric
-    if IS_FP16_AVAILABLE:
-        with torch.cuda.amp.autocast():
-            metric, elapsed_time = measure_metric(
-                model,
-                validate_dataloader,
-                task_name,
-            )
-    else:
-        metric, elapsed_time = measure_metric(
-            model,
-            validate_dataloader,
-            task_name,
-        )
+    metric, elapsed_time = measure_glue_metric(
+        model,
+        validate_dataloader,
+        task_name,
+    )
     print(f"BEFORE: {task_name} metric: {metric:.4f} {elapsed_time:.2f}s ({len(validate_dataloader.dataset)} samples)")
 
     if how_to_collect == "grads":
         # collect grads
-        if IS_FP16_AVAILABLE:
-            with torch.cuda.amp.autocast():
-                attention_head_grads, ff_neuron_grads, ff_layer_grads, attention_layer_grads, hidden_state_grads = (
-                    collect_mask_grads(
-                        model,
-                        sample_dataloader,
-                    )
-                )
-        else:
-            attention_head_grads, ff_neuron_grads, ff_layer_grads, attention_layer_grads, hidden_state_grads = (
-                collect_mask_grads(
-                    model,
-                    sample_dataloader,
-                )
+        attention_head_grads, ff_neuron_grads, ff_layer_grads, attention_layer_grads, hidden_state_grads = (
+            collect_mask_grads(
+                model,
+                sample_dataloader,
             )
+        )
 
         if how_to_average == "fisher_info":
             attention_head_importance = attention_head_grads.pow(2).sum(dim=0)
@@ -453,17 +438,10 @@ def main(
 
     elif how_to_collect == "activations":
         # collect activations
-        if IS_FP16_AVAILABLE:
-            with torch.cuda.amp.autocast():
-                head_activations = collect_activations(
-                    model,
-                    sample_dataloader,
-                )
-        else:
-            head_activations = collect_activations(
-                model,
-                sample_dataloader,
-            )
+        head_activations = collect_activations(
+            model,
+            sample_dataloader,
+        )
 
         if how_to_average == "fisher_info":
             attention_head_importance = head_activations.pow(2).sum(dim=0)
@@ -580,19 +558,11 @@ def main(
             )
 
         # measure before metric
-        if IS_FP16_AVAILABLE:
-            with torch.cuda.amp.autocast():
-                metric, elapsed_time = measure_metric(
-                    model,
-                    validate_dataloader,
-                    task_name,
-                )
-        else:
-            metric, elapsed_time = measure_metric(
-                model,
-                validate_dataloader,
-                task_name,
-            )
+        metric, elapsed_time = measure_glue_metric(
+            model,
+            validate_dataloader,
+            task_name,
+        )
         print(
             f"AFTER {remain_head_percentage * 100}% remain on {how_to_collect}/{how_to_average}: "
             f"{task_name} metric: {metric:.4f} {elapsed_time:.2f}s ({len(validate_dataloader.dataset)} samples)"
@@ -600,4 +570,8 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    if IS_FP16_AVAILABLE:
+        with torch.cuda.amp.autocast():
+            main()
+    else:
+        main()
