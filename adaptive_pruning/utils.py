@@ -5,6 +5,10 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 
+def count_parameters(model: nn.Module, require_grad: bool = False) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad == require_grad)
+
+
 def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, list[int]]) -> None:
     """
     Nullify weights of the specified attention heads in the model.

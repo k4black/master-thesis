@@ -14,7 +14,7 @@ def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list
     :param model: The transformers pytorch model to prune
     :param heads_to_prune: A dictionary with the layer indices as keys and a list of head indices to prune as values
     """
-    with warnings.catch_warnings(category=UserWarning):
+    with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # ignore "no-op" warning when pruning all heads in a layer
         model.prune_heads(heads_to_prune)
 
@@ -47,16 +47,25 @@ def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[i
     for layer_index, neurons in neurons_to_prune.items():
         neurons_indexes_to_keep = torch.LongTensor(list(set(range(model.config.intermediate_size)) - set(neurons)))
 
-        model.encoder.layer[layer_index].intermediate.dense = prune_linear_layer(
-            model.encoder.layer[layer_index].intermediate.dense,
-            neurons_indexes_to_keep,
-            dim=0,
-        )
-        model.encoder.layer[layer_index].output.dense = prune_linear_layer(
-            model.encoder.layer[layer_index].output.dense,
-            neurons_indexes_to_keep,
-            dim=1,
-        )
+        for name, dim in [("intermediate", 0), ("output", 1)]:
+            param = model.encoder.layer[layer_index].__getattr__(name)
+
+            param.dense = prune_linear_layer(
+                param.dense,
+                neurons_indexes_to_keep,
+                dim=dim,
+            )
+            # code in `prune_linear_layer` slow down the inference
+            # so re-create nn.Linear with the same weight and bias
+            weights = param.dense.weight
+            bias = param.dense.bias
+            param.dense = nn.Linear(
+                param.dense.in_features,
+                param.dense.out_features,
+                device=param.dense.weight.device,
+            )
+            param.dense.weight = nn.Parameter(weights, requires_grad=weights.requires_grad)
+            param.dense.bias = nn.Parameter(bias, requires_grad=bias.requires_grad)
 
 
 def prune_ffn_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None:
@@ -67,14 +76,18 @@ def prune_ffn_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None
     :param model: The transformers pytorch model to prune
     :param layers_to_prune: A list of layer indices to prune
     """
-    with warnings.catch_warnings(category=UserWarning):
+    with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # ignore "no-op" warning when pruning all neurons in a layer
         for layer_index in layers_to_prune:
             model.encoder.layer[layer_index].intermediate.dense = nn.Linear(
-                model.encoder.layer[layer_index].intermediate.dense.in_features, 0
+                model.encoder.layer[layer_index].intermediate.dense.in_features,
+                0,
+                device=model.encoder.layer[layer_index].intermediate.dense.weight.device,
             )
             model.encoder.layer[layer_index].output.dense = nn.Linear(
-                0, model.encoder.layer[layer_index].output.dense.out_features
+                0,
+                model.encoder.layer[layer_index].output.dense.out_features,
+                device=model.encoder.layer[layer_index].output.dense.weight.device,
             )
     # remove bias
     for layer_index in layers_to_prune:
@@ -115,7 +128,7 @@ def _prune_layer_norm(layer: nn.LayerNorm, index: torch.LongTensor) -> nn.LayerN
     return new_layer
 
 
-def prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int]) -> None:
+def do_prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int]) -> None:
     """
     Prune specific neurons from all hidden states along the model, including embeddings layer
 
@@ -196,3 +209,159 @@ def prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int]) -> N
     )
     # update config
     model.config.hidden_size = len(neurons_indexes_to_keep)
+
+
+def select_to_prune_attention_heads(
+        importance_scores: torch.Tensor, percent_heads_to_prune: float, uniform_among_layers: bool = False
+) -> dict[int, list[int]]:
+    """
+    Select least-k attention heads based on the importance scores.
+    Keep at least 1 attention head per layer
+
+    Note: prune heads regardless of the layer, so remove the least important head among the whole model
+    i.e. can prune all heads for layer 1 and none in layer 2
+
+    :param importance_scores: The importance scores of the attention heads [num_hidden_layers, num_attention_heads]
+    :param percent_heads_to_prune: The percentage of attention heads to keep
+    :param uniform_among_layers: If True, prune the same number of heads from each layer
+    :return: A dictionary with the layer indices as keys and a list of head indices to prune as values
+    """
+    assert 0 <= percent_heads_to_prune <= 1, "percent_heads_to_prune should be in [0, 1]"
+
+    heads_to_prune = {}
+    num_layers, num_heads = importance_scores.size()
+
+    if uniform_among_layers:
+        num_heads_to_prune = int(num_heads * percent_heads_to_prune)
+
+        for layer_index in range(num_layers):
+            # sort heads by importance
+            importance_scores_layer = importance_scores[layer_index]
+            _, sorted_indices = importance_scores_layer.sort()
+            heads_to_prune_layer = sorted_indices[:num_heads_to_prune].tolist()
+            heads_to_prune[layer_index] = heads_to_prune_layer
+
+    else:
+        num_heads_to_prune = int(num_layers * num_heads * percent_heads_to_prune)
+
+        # sort heads by importance
+        importance_scores_flatten = importance_scores.view(-1)
+        _, sorted_indices = importance_scores_flatten.sort()
+        heads_to_prune_flatten = sorted_indices[:num_heads_to_prune]
+
+        # convert to layer-head indices
+        for head_index in heads_to_prune_flatten:
+            head_index = int(head_index.item())
+            layer_index = head_index // num_heads
+            head_index = head_index % num_heads
+            heads_to_prune.setdefault(layer_index, []).append(head_index)
+
+    # keep at least 1 head per layer, remove unused heads_to_prune lists
+    for layer in list(heads_to_prune.keys()):
+        if len(heads_to_prune[layer]) == num_heads:
+            heads_to_prune[layer].pop()
+        if len(heads_to_prune[layer]) == 0:
+            del heads_to_prune[layer]
+
+    return heads_to_prune
+
+
+def select_to_prune_attention_layers(importance_scores: torch.Tensor, percent_layers_to_prune: float) -> list[int]:
+    """
+    Select least-k attention layers based on the importance scores.
+
+    :param importance_scores: The importance scores of the attention layers [num_hidden_layers]
+    :param percent_layers_to_prune: The percentage of attention layers to keep
+    :return: A list of layer indices to prune
+    """
+    assert 0 <= percent_layers_to_prune <= 1, "percent_layers_to_prune should be in [0, 1]"
+
+    num_layers = importance_scores.size(0)
+    num_layers_to_prune = int(num_layers * percent_layers_to_prune)
+
+    _, sorted_indices = importance_scores.sort()
+    layers_to_prune = sorted_indices[:num_layers_to_prune].tolist()
+
+    return layers_to_prune
+
+
+def select_to_prune_ffn_neurons(
+        importance_scores: torch.Tensor, percent_neurons_to_prune: float, uniform_among_layers: bool = False
+) -> dict[int, list[int]]:
+    """
+    Select least-k feed forward neurons based on the importance scores.
+
+    :param importance_scores: The importance scores of the feed forward neurons [num_hidden_layers, intermediate_size]
+    :param percent_neurons_to_prune: The percentage of feed forward neurons to keep
+    :param uniform_among_layers: If True, prune the same number of neurons from each layer
+    :return: A dictionary with the layer indices as keys and a list of neuron indices to prune as values
+    """
+    assert 0 <= percent_neurons_to_prune <= 1, "percent_neurons_to_prune should be in [0, 1]"
+
+    neurons_to_prune = {}
+    num_layers, num_neurons = importance_scores.size()
+
+    if uniform_among_layers:
+        num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
+
+        for layer_index in range(num_layers):
+            # sort neurons by importance
+            importance_scores_layer = importance_scores[layer_index]
+            _, sorted_indices = importance_scores_layer.sort()
+            neurons_to_prune_layer = sorted_indices[:num_neurons_to_prune].tolist()
+            neurons_to_prune[layer_index] = neurons_to_prune_layer
+
+    else:
+        num_neurons_to_prune = int(num_layers * num_neurons * percent_neurons_to_prune)
+
+        # sort neurons by importance
+        importance_scores_flatten = importance_scores.view(-1)
+        _, sorted_indices = importance_scores_flatten.sort()
+        neurons_to_prune_flatten = sorted_indices[:num_neurons_to_prune]
+
+        # convert to layer-neuron indices
+        for neuron_index in neurons_to_prune_flatten:
+            neuron_index = int(neuron_index.item())
+            layer_index = neuron_index // num_neurons
+            neuron_index = neuron_index % num_neurons
+            neurons_to_prune.setdefault(layer_index, []).append(neuron_index)
+
+    return neurons_to_prune
+
+
+def select_to_prune_ffn_layers(importance_scores: torch.Tensor, percent_layers_to_prune: float) -> list[int]:
+    """
+    Select least-k feed forward layers based on the importance scores.
+
+    :param importance_scores: The importance scores of the feed forward layers [num_hidden_layers]
+    :param percent_layers_to_prune: The percentage of feed forward layers to keep
+    :return: A list of layer indices to prune
+    """
+    assert 0 <= percent_layers_to_prune <= 1, "percent_layers_to_prune should be in [0, 1]"
+
+    num_layers = importance_scores.size(0)
+    num_layers_to_prune = int(num_layers * percent_layers_to_prune)
+
+    _, sorted_indices = importance_scores.sort()
+    layers_to_prune = sorted_indices[:num_layers_to_prune].tolist()
+
+    return layers_to_prune
+
+
+def select_to_prune_hidden_state(importance_scores: torch.Tensor, percent_neurons_to_prune: float) -> list[int]:
+    """
+    Select least-k neurons based on the importance scores.
+
+    :param importance_scores: The importance scores of the hidden states [hidden_size]
+    :param percent_neurons_to_prune: The percentage of hidden states to keep
+    :return: A list of neuron indices to prune
+    """
+    assert 0 <= percent_neurons_to_prune <= 1, "percent_neurons_to_prune should be in [0, 1]"
+
+    num_neurons = importance_scores.size(0)
+    num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
+
+    _, sorted_indices = importance_scores.sort()
+    neurons_to_prune = sorted_indices[:num_neurons_to_prune].tolist()
+
+    return neurons_to_prune

@@ -35,17 +35,17 @@ class TestInjectAttentionHeadMask:
             nullified_last_hidden_state = nullified_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the nullified model is different from the original model
-            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_attention_head_mask(bert_tiny_model, head_mask)
             masked_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the masked model is different from the original model
-            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
 
             # check that the output of the masked model is the same as the nullified model
-            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state, atol=1e-5)
+            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state)
 
             # remove mask via handles
             for handle in masking_handles:
@@ -53,7 +53,7 @@ class TestInjectAttentionHeadMask:
             no_handles_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the model with removed handles is the same as the original model
-            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
 
 
 class TestInjectAttentionLayerMask:
@@ -76,17 +76,17 @@ class TestInjectAttentionLayerMask:
             nullified_last_hidden_state = nullified_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the nullified model is different from the original model
-            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_attention_layer_mask(bert_tiny_model, layer_mask)
             masked_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the masked model is different from the original model
-            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
 
             # check that the output of the masked model is the same as the nullified model
-            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state, atol=1e-5)
+            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state)
 
             # remove mask via handles
             for handle in masking_handles:
@@ -94,7 +94,7 @@ class TestInjectAttentionLayerMask:
             no_handles_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the model with removed handles is the same as the original model
-            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
 
 
 class TestInjectFfnNeuronMask:
@@ -117,17 +117,17 @@ class TestInjectFfnNeuronMask:
             nullified_last_hidden_state = nullified_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the nullified model is different from the original model
-            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_ffn_neuron_mask(bert_tiny_model, neuron_mask)
             masked_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the masked model is different from the original model
-            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
 
             # check that the output of the masked model is the same as the nullified model
-            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state, atol=1e-5)
+            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state)
 
             # remove mask via handles
             for handle in masking_handles:
@@ -135,7 +135,7 @@ class TestInjectFfnNeuronMask:
             no_handles_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the model with removed handles is the same as the original model
-            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
 
 
 class TestInjectFfnLayerMask:
@@ -158,17 +158,17 @@ class TestInjectFfnLayerMask:
             nullified_last_hidden_state = nullified_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the nullified model is different from the original model
-            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_ffn_layer_mask(bert_tiny_model, layer_mask)
             masked_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the masked model is different from the original model
-            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
 
             # check that the output of the masked model is the same as the nullified model
-            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state, atol=1e-5)
+            assert torch.allclose(masked_last_hidden_state, nullified_last_hidden_state)
 
             # remove mask via handles
             for handle in masking_handles:
@@ -176,5 +176,5 @@ class TestInjectFfnLayerMask:
             no_handles_last_hidden_state = bert_tiny_model(random_input["input_ids"], random_input["attention_mask"])[0]
 
             # check that the output of the model with removed handles is the same as the original model
-            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state, atol=1e-5)
+            assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
 
