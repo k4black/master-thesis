@@ -6,34 +6,34 @@ from torch.utils.hooks import RemovableHandle
 from transformers import PreTrainedModel
 
 
-def _register_pre_mask(module: nn.Module, mask: torch.Tensor) -> RemovableHandle:
+def _register_pre_mask(module: nn.Module, mask: torch.Tensor, extra_mask: torch.Tensor | None) -> RemovableHandle:
     # Note: It is important to have separate function to limit shadowing of the inputs variable, e.g. layer
 
     def hook(_module: nn.Module, inputs: Any) -> Any:
         if isinstance(inputs, tuple):
-            return inputs[0] * mask, *inputs[1:]
+            return inputs[0] * mask * (extra_mask or 1), *inputs[1:]
         else:
-            return inputs * mask
+            return inputs * mask * (extra_mask or 1)
 
     handle = module.register_forward_pre_hook(hook)
     return handle
 
 
-def _register_post_mask(module: nn.Module, mask: torch.Tensor) -> RemovableHandle:
+def _register_post_mask(module: nn.Module, mask: torch.Tensor, extra_mask: torch.Tensor | None) -> RemovableHandle:
     # Note: It is important to have separate function to limit shadowing of the inputs variable, e.g. layer
 
     def hook(_module: nn.Module, _inputs: Any, outputs: Any) -> Any:
         if isinstance(outputs, tuple):
-            return outputs[0] * mask, *outputs[1:]
+            return outputs[0] * mask * (extra_mask or 1), *outputs[1:]
         else:
-            return outputs * mask
+            return outputs * mask * (extra_mask or 1)
 
     handle = module.register_forward_hook(hook)
     return handle
 
 
 def inject_attention_head_mask(
-         model: PreTrainedModel, head_mask: torch.Tensor
+         model: PreTrainedModel, head_mask: torch.Tensor, extra_mask: torch.Tensor | None = None
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's attention heads such a way it emulates the effect of pruning.
@@ -55,13 +55,15 @@ def inject_attention_head_mask(
         # TODO: check gradient is calc correctly
         # head_mask of shape [num_attention_heads] extend to have shape of [num_attention_heads*attention_head_size]
         broadcased_head_mask = head_mask[layer].repeat_interleave(attention_head_size)
-        removable_handles.append(_register_post_mask(model.encoder.layer[layer].attention.self, broadcased_head_mask))
+        removable_handles.append(
+            _register_post_mask(model.encoder.layer[layer].attention.self, broadcased_head_mask, extra_mask=extra_mask)
+        )
 
     return removable_handles
 
 
 def inject_attention_layer_mask(
-        model: PreTrainedModel, layer_mask: torch.Tensor
+        model: PreTrainedModel, layer_mask: torch.Tensor, extra_mask: torch.Tensor | None = None
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's attention layers such a way it emulates the effect of pruning.
@@ -79,15 +81,19 @@ def inject_attention_layer_mask(
     removable_handles = []
 
     for layer in range(model.config.num_hidden_layers):
-        removable_handles.append(_register_pre_mask(model.encoder.layer[layer].attention.output, layer_mask[layer]))
+        removable_handles.append(
+            _register_pre_mask(model.encoder.layer[layer].attention.output, layer_mask[layer], extra_mask=extra_mask)
+        )
         # to remove bias
-        removable_handles.append(_register_post_mask(model.encoder.layer[layer].attention.output.dense, layer_mask[layer]))
+        removable_handles.append(
+            _register_post_mask(model.encoder.layer[layer].attention.output.dense, layer_mask[layer], extra_mask=extra_mask)
+        )
 
     return removable_handles
 
 
 def inject_ffn_neuron_mask(
-        model: PreTrainedModel, neuron_mask: torch.Tensor
+        model: PreTrainedModel, neuron_mask: torch.Tensor, extra_mask: torch.Tensor | None = None
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's feed forward neurons such a way it emulates the effect of pruning.
@@ -105,13 +111,15 @@ def inject_ffn_neuron_mask(
     removable_handles = []
 
     for layer in range(model.config.num_hidden_layers):
-        removable_handles.append(_register_pre_mask(model.encoder.layer[layer].output, neuron_mask[layer]))
+        removable_handles.append(
+            _register_pre_mask(model.encoder.layer[layer].output, neuron_mask[layer], extra_mask=extra_mask)
+        )
 
     return removable_handles
 
 
 def inject_ffn_layer_mask(
-        model: PreTrainedModel, layer_mask: torch.Tensor
+        model: PreTrainedModel, layer_mask: torch.Tensor, extra_mask: torch.Tensor | None = None
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's feed forward layers such a way it emulates the effect of pruning.
@@ -129,15 +137,19 @@ def inject_ffn_layer_mask(
     removable_handles = []
 
     for layer in range(model.config.num_hidden_layers):
-        removable_handles.append(_register_pre_mask(model.encoder.layer[layer].output, layer_mask[layer]))
+        removable_handles.append(
+            _register_pre_mask(model.encoder.layer[layer].output, layer_mask[layer], extra_mask=extra_mask)
+        )
         # to remove bias
-        removable_handles.append(_register_post_mask(model.encoder.layer[layer].output.dense, layer_mask[layer]))
+        removable_handles.append(
+            _register_post_mask(model.encoder.layer[layer].output.dense, layer_mask[layer], extra_mask=extra_mask)
+        )
 
     return removable_handles
 
 
 def inject_hidden_state_mask(
-        model: PreTrainedModel, hidden_state_mask: torch.Tensor
+        model: PreTrainedModel, hidden_state_mask: torch.Tensor, extra_mask: torch.Tensor | None = None
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's hidden states such a way it emulates the effect of pruning.

@@ -1,6 +1,7 @@
 import pytest
 import torch
-from transformers import PreTrainedTokenizer, PreTrainedModel
+from torch.utils.data import DataLoader
+from transformers import PreTrainedTokenizer, PreTrainedModel, DataCollatorWithPadding
 from datasets import Dataset
 
 
@@ -31,6 +32,28 @@ def bert_tiny_model() -> PreTrainedModel:
 
 
 @pytest.fixture
+def bert_tiny_clf_model() -> PreTrainedModel:
+    from transformers import BertForSequenceClassification, BertConfig
+    try:
+        config = BertConfig.from_pretrained(HF_BERT_TINY, num_labels=3, local_files_only=True)
+        model = BertForSequenceClassification.from_pretrained(HF_BERT_TINY, config=config, local_files_only=True)
+    except Exception:
+        config = BertConfig.from_pretrained(HF_BERT_TINY, num_labels=3, local_files_only=False)
+        model = BertForSequenceClassification.from_pretrained(HF_BERT_TINY, config=config, local_files_only=False)
+    return model
+
+
+@pytest.fixture
+def bert_tiny_lm_model() -> PreTrainedModel:
+    from transformers import BertForMaskedLM
+    try:
+        model = BertForMaskedLM.from_pretrained(HF_BERT_TINY, local_files_only=True)
+    except Exception:
+        model = BertForMaskedLM.from_pretrained(HF_BERT_TINY, local_files_only=False)
+    return model
+
+
+@pytest.fixture
 def simple_mnli_dataset() -> Dataset:
     from datasets import Dataset, Features, Value, ClassLabel
     return Dataset.from_dict(
@@ -50,7 +73,7 @@ def simple_mnli_dataset() -> Dataset:
 
 
 @pytest.fixture
-def random_input() -> dict[str, torch.Tensor]:
+def random_input_batch() -> dict[str, torch.Tensor]:
     """
     Returns a dictionary with random input_ids, attention_mask and label tensors.
     :return: [4, 10] input_ids, [4, 10] attention_mask, [4] label
@@ -61,6 +84,22 @@ def random_input() -> dict[str, torch.Tensor]:
         "attention_mask": torch.randint(0, 2, (4, 10)),
         "label": torch.randint(0, 3, (4,)),
     }
+
+
+@pytest.fixture
+def random_dataloader(bert_tiny_tokenizer: PreTrainedTokenizer) -> DataLoader:
+    return DataLoader(
+        Dataset.from_list([
+            {
+                "input_ids": torch.randint(0, 100, (10,)),
+                "attention_mask": torch.randint(0, 2, (10,)),
+                "label": torch.randint(0, 3, ()),
+            }
+            for _ in range(8)
+        ]),
+        collate_fn=DataCollatorWithPadding(tokenizer=bert_tiny_tokenizer),
+        batch_size=4,
+    )
 
 
 # Pytest configuration

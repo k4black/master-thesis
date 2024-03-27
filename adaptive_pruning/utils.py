@@ -1,12 +1,76 @@
-import warnings
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, PreTrainedTokenizer
+from calflops import calculate_flops
 
 
-def count_parameters(model: nn.Module, require_grad: bool = False) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad == require_grad)
+def count_flops_macs_params(
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizer,
+        batch_size: int = 8,
+        max_seq_length: int = 128,
+        *,
+        print_results: bool = True,
+) -> tuple[int, int, int]:
+    max_seq_length = max_seq_length or tokenizer.model_max_length
+
+    flops, macs, params = calculate_flops(
+        model=model,
+        transformer_tokenizer=tokenizer,
+        input_shape=(batch_size, max_seq_length),
+        include_backPropagation=False,
+        print_results=print_results,
+        print_detailed=False,
+        output_as_string=False,
+        output_precision=4,
+    )
+    if print_results:
+        print(f"FLOPs:{flops}   MACs:{macs}   Params:{params} \n")
+    return flops, macs, params
+
+
+def count_parameters(
+        model: nn.Module,
+        require_grad: bool | None = None,
+        *,
+        print_results: bool = True,
+) -> int:
+    """
+    Count the number of parameters in the model.
+    :param model: torch.nn.Module or transformers.PreTrainedModel
+    :param require_grad: if defined (not None), count only parameters that require/not-require grad
+    :return: The number of parameters in the model
+    """
+    if require_grad is None:
+        num_params = sum(p.numel() for p in model.parameters())
+    else:
+        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad == require_grad)
+
+    if print_results:
+        params_type = 'All' if require_grad is None else 'Trainable' if require_grad else 'Frozen'
+        print(f"Number of {params_type} parameters: {num_params}")
+
+    return num_params
+
+
+def format_number(number: int) -> str:
+    """Format a number with K/M/B suffixes.
+
+    :param number: The number to format
+    :return: The formatted number
+    """
+    if abs(number) >= 1_000_000_000:
+        return f"{number / 1_000_000_000:.1f}B"
+    elif abs(number) >= 1_000_000:
+        formatted_number = round(number / 1_000_000, 1)
+        return f"{formatted_number:.1f}M" if formatted_number < 1000 else f"{formatted_number / 1000:.1f}B"
+    elif abs(number) >= 1_000:
+        formatted_number = round(number / 1_000, 1)
+        return f"{formatted_number:.1f}K" if formatted_number < 1000 else f"{formatted_number / 1000:.1f}M"
+    else:
+        return str(number)
 
 
 def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, list[int]]) -> None:
