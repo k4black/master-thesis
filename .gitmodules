@@ -1,0 +1,3 @@
+[submodule "llm_pruner"]
+	path = external/llm_pruner
+	url = git@github.com:horseee/LLM-Pruner.git
