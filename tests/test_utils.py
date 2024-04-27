@@ -8,11 +8,6 @@ from adaptive_pruning.utils import count_parameters, format_number
 
 class TestCountParameters:
 
-    def test_bert_tiny(self, bert_tiny_model: PreTrainedModel) -> None:
-        num_parameters = count_parameters(bert_tiny_model)
-
-        assert num_parameters == 4_385_920
-
     @pytest.mark.parametrize(
         "module, expected",
         [
@@ -26,6 +21,14 @@ class TestCountParameters:
         num_parameters = count_parameters(module)
 
         assert num_parameters == expected
+
+    def test_bert_test_model(self, bert_test_model: PreTrainedModel) -> None:
+        num_parameters = count_parameters(bert_test_model)
+        assert num_parameters == 341_696
+
+    def test_llama_test_model(self, llama_lm_test_model: PreTrainedModel) -> None:
+        num_parameters = count_parameters(llama_lm_test_model)
+        assert num_parameters == 598_336
 
 
 class TestFormatNumber:

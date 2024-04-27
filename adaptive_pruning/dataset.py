@@ -29,8 +29,9 @@ def load_glue_dataset(task_name: str, tokenizer: PreTrainedTokenizer) -> Dataset
         return tokenizer(
             examples[text_1],
             examples[text_2] if text_2 else None,
-            padding=False,
+            padding=True,
             truncation=True,
+            padding_side="left",
             max_length=tokenizer.model_max_length,
         )
 

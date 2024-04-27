@@ -1,9 +1,35 @@
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from calflops import calculate_flops
+
+
+class TargetModules(NamedTuple):
+    attention_heads: str | list[str] | None
+    attention_layers: str | list[str] | None
+    ffn_neurons: str | list[str] | None
+    ffn_layers: str | list[str] | None
+    hidden_states: str | list[str] | None
+
+
+ARCHITECTURE_TO_TARGET_MODULES = {
+    "bert": TargetModules(
+        attention_heads="attention.self",
+        attention_layers="attention.output",
+        ffn_neurons="output",
+        ffn_layers="output.dense",
+        hidden_states=["embeddings"],
+    ),
+}
+
+
+def get_model_part_by_name(model: PreTrainedModel, name: str) -> nn.Module:
+    pass
+
 
 
 def count_flops_macs_params(
@@ -16,7 +42,7 @@ def count_flops_macs_params(
 ) -> tuple[int, int, int]:
     max_seq_length = max_seq_length or tokenizer.model_max_length
 
-    flops, macs, params = calculate_flops(
+    flops, macs, lib_params = calculate_flops(
         model=model,
         transformer_tokenizer=tokenizer,
         input_shape=(batch_size, max_seq_length),
@@ -26,6 +52,7 @@ def count_flops_macs_params(
         output_as_string=False,
         output_precision=4,
     )
+    params = count_parameters(model, require_grad=None, print_results=False)
     if print_results:
         print(f"FLOPs:{flops}   MACs:{macs}   Params:{params} \n")
     return flops, macs, params

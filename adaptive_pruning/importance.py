@@ -39,6 +39,7 @@ class ComponentsImportance(NamedTuple):
 def collect_mask_grads(
         model: PreTrainedModel,
         dataloader: DataLoader,
+        architecture: str = "bert",
         *,
         verbose: bool = True,
 ) -> ComponentsInfo:
@@ -71,12 +72,19 @@ def collect_mask_grads(
     meta_mask.requires_grad_(True)
 
     # apply masks to model
+    sub_model = model
+    if architecture == "bert":
+        sub_model = model.bert
+    elif architecture == "llama":
+        sub_model = model.model
+    else:
+        raise ValueError(f"Unsupported architecture: {architecture}")
     handles: list[RemovableHandle] = [
-        *inject_attention_head_mask(model.bert, attention_head_mask, meta_mask[0]),
-        *inject_attention_layer_mask(model.bert, attention_layer_mask, meta_mask[1]),
-        *inject_ffn_neuron_mask(model.bert, ffn_neuron_mask, meta_mask[2]),
-        *inject_ffn_layer_mask(model.bert, ffn_layer_mask, meta_mask[3]),
-        # *inject_hidden_state_mask(model_to_insert, hidden_state_mask, meta_mask[4]),
+        *inject_attention_head_mask(sub_model, attention_head_mask, meta_mask[0], architecture=architecture),
+        *inject_attention_layer_mask(sub_model, attention_layer_mask, meta_mask[1], architecture=architecture),
+        *inject_ffn_neuron_mask(sub_model, ffn_neuron_mask, meta_mask[2], architecture=architecture),
+        *inject_ffn_layer_mask(sub_model, ffn_layer_mask, meta_mask[3], architecture=architecture),
+        # *inject_hidden_state_mask(sub_model, hidden_state_mask, meta_mask[4], architecture=architecture),
     ]
 
     attention_head_grads = torch.empty((0, config.num_hidden_layers, config.num_attention_heads)).to(model.device, non_blocking=True)

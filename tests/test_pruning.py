@@ -5,7 +5,7 @@ from transformers import PreTrainedModel
 import torch
 
 from adaptive_pruning.pruning import (
-    prune_attention_heads, prune_attention_layers, prune_ffn_neurons, prune_ffn_layers, do_prune_hidden_state,
+    prune_attention_heads, prune_attention_layers, prune_ffn_neurons, prune_ffn_layers, prune_hidden_state,
     select_to_prune_attention_heads, select_to_prune_attention_layers, select_to_prune_ffn_neurons,
     select_to_prune_ffn_layers
 )
@@ -29,64 +29,65 @@ class TestPruneAttentionHeads:
     @pytest.mark.parametrize(
         "heads_to_prune, expected_heads",
         [
-            ({}, [2, 2]),
-            ({0: [0]}, [1, 2]),
-            ({0: [0], 1: [0]}, [1, 1]),
-            ({0: [0, 1], 1: [0, 1]}, [0, 0]),
+            ({}, [4, 4]),
+            ({0: [0]}, [3, 4]),
+            ({0: [0], 1: [0]}, [3, 3]),
+            ({0: [0, 1], 1: [0, 1]}, [2, 2]),
+            ({0: [0, 1, 2, 3], 1: [0, 1, 2, 3]}, [0, 0]),
         ],
     )
     def test_num_heads(
-        self, bert_tiny_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
+        self, bert_test_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
     ) -> None:
-        self._assert_attention_heads_number_by_layer(bert_tiny_model, [2, 2])
+        self._assert_attention_heads_number_by_layer(bert_test_model, [4, 4])
 
-        prune_attention_heads(bert_tiny_model, heads_to_prune)
+        prune_attention_heads(bert_test_model, heads_to_prune)
 
-        self._assert_attention_heads_number_by_layer(bert_tiny_model, expected_heads)
+        self._assert_attention_heads_number_by_layer(bert_test_model, expected_heads)
 
-    def test_requires_grad(self, bert_tiny_model: PreTrainedModel) -> None:
+    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         heads_to_prune = {0: [0]}
 
         # save old requires_grad
-        old_requires_grad_query = bert_tiny_model.encoder.layer[0].attention.self.query.weight.requires_grad
-        old_requires_grad_bias = bert_tiny_model.encoder.layer[0].attention.self.query.bias.requires_grad
+        old_requires_grad_query = bert_test_model.encoder.layer[0].attention.self.query.weight.requires_grad
+        old_requires_grad_bias = bert_test_model.encoder.layer[0].attention.self.query.bias.requires_grad
 
         # prune
-        prune_attention_heads(bert_tiny_model, heads_to_prune)
+        prune_attention_heads(bert_test_model, heads_to_prune)
 
         # check that the model requires grad
-        assert bert_tiny_model.encoder.layer[0].attention.self.query.weight.requires_grad == old_requires_grad_query
-        assert bert_tiny_model.encoder.layer[0].attention.self.query.bias.requires_grad == old_requires_grad_bias
+        assert bert_test_model.encoder.layer[0].attention.self.query.weight.requires_grad == old_requires_grad_query
+        assert bert_test_model.encoder.layer[0].attention.self.query.bias.requires_grad == old_requires_grad_bias
 
-    def test_same_as_nullify(self, bert_tiny_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             head_index = 0
             heads_to_prune = {0: [head_index]}
 
             # nullify first head of the first layer
-            nullified_model = copy.deepcopy(bert_tiny_model)
+            nullified_model = copy.deepcopy(bert_test_model)
             nullify_attention_heads(nullified_model, heads_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the nullified model is different from the original model
+            # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # prune the first head of the first layer
-            prune_attention_heads(bert_tiny_model, heads_to_prune)
+            prune_attention_heads(bert_test_model, heads_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the pruned model is different from the original model
+            # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
 
-            # check that the output of the pruned model is the same as the nullified model
+            # check the output of the pruned model is the same as the nullified model
             assert torch.allclose(pruned_last_hidden_state, nullified_last_hidden_state)
 
 
@@ -108,55 +109,55 @@ class TestAttentionLayerPruning:
         ],
     )
     def test_layer_pruning(
-        self, bert_tiny_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
+        self, bert_test_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
     ) -> None:
-        self._assert_attention_layers_existence(bert_tiny_model, [True, True])
+        self._assert_attention_layers_existence(bert_test_model, [True, True])
 
-        prune_attention_layers(bert_tiny_model, layers_to_prune)
+        prune_attention_layers(bert_test_model, layers_to_prune)
 
-        self._assert_attention_layers_existence(bert_tiny_model, expected_layers)
+        self._assert_attention_layers_existence(bert_test_model, expected_layers)
 
-    def test_requires_grad(self, bert_tiny_model: PreTrainedModel) -> None:
+    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         layers_to_prune = [0]
 
         # save old requires_grad
-        old_requires_grad = bert_tiny_model.encoder.layer[0].attention.output.dense.weight.requires_grad
+        old_requires_grad = bert_test_model.encoder.layer[0].attention.output.dense.weight.requires_grad
 
         # prune
-        prune_attention_layers(bert_tiny_model, layers_to_prune)
+        prune_attention_layers(bert_test_model, layers_to_prune)
 
         # check that the model requires grad
-        assert bert_tiny_model.encoder.layer[0].attention.output.dense.weight.requires_grad == old_requires_grad
+        assert bert_test_model.encoder.layer[0].attention.output.dense.weight.requires_grad == old_requires_grad
 
-    def test_same_as_nullify(self, bert_tiny_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             layer_index = 0
             layers_to_prune = [layer_index]
 
             # nullify first layer
-            nullified_model = copy.deepcopy(bert_tiny_model)
+            nullified_model = copy.deepcopy(bert_test_model)
             nullify_attention_layers(nullified_model, layers_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the nullified model is different from the original model
+            # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # prune the first layer
-            prune_attention_layers(bert_tiny_model, layers_to_prune)
+            prune_attention_layers(bert_test_model, layers_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the pruned model is different from the original model
+            # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
 
-            # check that the output of the pruned model is the same as the nullified model
+            # check the output of the pruned model is the same as the nullified model
             assert torch.allclose(pruned_last_hidden_state, nullified_last_hidden_state)
 
 
@@ -172,66 +173,66 @@ class TestPruneFeedForwardNeurons:
     @pytest.mark.parametrize(
         "neurons_to_prune, expected_neurons",
         [
-            ({}, [512, 512]),
-            ({0: [0]}, [511, 512]),
-            ({0: [0, 211]}, [510, 512]),
-            ({0: [50, 21], 1: [20, 21]}, [510, 510]),
-            ({0: [0, 8, 10, 31], 1: [0, 3, 5, 7, 510, 511]}, [508, 506]),
+            ({}, [128, 128]),
+            ({0: [0]}, [127, 128]),
+            ({0: [0, 120]}, [126, 128]),
+            ({0: [50, 21], 1: [20, 21]}, [126, 126]),
+            ({0: [0, 8, 10, 31], 1: [0, 3, 5, 7, 126, 127]}, [124, 122]),
         ],
     )
     def test_num_neurons(
-        self, bert_tiny_model: PreTrainedModel, neurons_to_prune: dict[int, list[int]], expected_neurons: list[int],
+        self, bert_test_model: PreTrainedModel, neurons_to_prune: dict[int, list[int]], expected_neurons: list[int],
     ) -> None:
-        self._assert_feed_forward_neurons_number_by_layer(bert_tiny_model, [512, 512])
+        self._assert_feed_forward_neurons_number_by_layer(bert_test_model, [128, 128])
 
-        prune_ffn_neurons(bert_tiny_model, neurons_to_prune)
+        prune_ffn_neurons(bert_test_model, neurons_to_prune)
 
-        self._assert_feed_forward_neurons_number_by_layer(bert_tiny_model, expected_neurons)
+        self._assert_feed_forward_neurons_number_by_layer(bert_test_model, expected_neurons)
 
-    def test_requires_grad(self, bert_tiny_model: PreTrainedModel) -> None:
+    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
         # set params
-        neurons_to_prune = {0: [0, 10, *range(50, 60), 511]}
+        neurons_to_prune = {0: [0, 10, *range(50, 60), 127]}
 
         # save old requires_grad
-        old_requires_grad_intermediate = bert_tiny_model.encoder.layer[0].intermediate.dense.weight.requires_grad
-        old_requires_grad_output = bert_tiny_model.encoder.layer[0].output.dense.weight.requires_grad
+        old_requires_grad_intermediate = bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad
+        old_requires_grad_output = bert_test_model.encoder.layer[0].output.dense.weight.requires_grad
 
         # prune
-        prune_ffn_neurons(bert_tiny_model, neurons_to_prune)
+        prune_ffn_neurons(bert_test_model, neurons_to_prune)
 
         # check that the model requires grad
-        assert bert_tiny_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
-        assert bert_tiny_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
+        assert bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
+        assert bert_test_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
 
-    def test_same_as_nullify(self, bert_tiny_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
-            neurons_to_prune = {0: [0, 10, *range(50, 60), 511]}
+            neurons_to_prune = {0: [0, 10, *range(50, 60), 127]}
 
             # nullify first neuron of the first layer
-            nullified_model = copy.deepcopy(bert_tiny_model)
+            nullified_model = copy.deepcopy(bert_test_model)
             nullify_ffn_neurons(nullified_model, neurons_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the nullified model is different from the original model
+            # check the output of the nullified model is different from the original model
             assert original_last_hidden_state.shape == nullified_last_hidden_state.shape
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state, atol=1e-5)
 
             # prune the first neuron of the first layer
-            prune_ffn_neurons(bert_tiny_model, neurons_to_prune)
+            prune_ffn_neurons(bert_test_model, neurons_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the pruned model is different from the original model
+            # check the output of the pruned model is different from the original model
             assert original_last_hidden_state.shape == pruned_last_hidden_state.shape
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state, atol=1e-5)
 
-            # check that the output of the pruned model is the same as the nullified model
+            # check the output of the pruned model is the same as the nullified model
             assert nullified_last_hidden_state.shape == pruned_last_hidden_state.shape
             assert torch.allclose(pruned_last_hidden_state, nullified_last_hidden_state, atol=1e-5)
 
@@ -261,56 +262,56 @@ class TestPruneFeedForwardLayers:
         ],
     )
     def test_layer_pruning(
-        self, bert_tiny_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
+        self, bert_test_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
     ) -> None:
-        self._assert_feed_forward_layers_existence(bert_tiny_model, [True, True])
+        self._assert_feed_forward_layers_existence(bert_test_model, [True, True])
 
-        prune_ffn_layers(bert_tiny_model, layers_to_prune)
+        prune_ffn_layers(bert_test_model, layers_to_prune)
 
-        self._assert_feed_forward_layers_existence(bert_tiny_model, expected_layers)
+        self._assert_feed_forward_layers_existence(bert_test_model, expected_layers)
 
-    def test_requires_grad(self, bert_tiny_model: PreTrainedModel) -> None:
+    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         layers_to_prune = [0]
 
         # save old requires_grad
-        old_requires_grad_intermediate = bert_tiny_model.encoder.layer[0].intermediate.dense.weight.requires_grad
-        old_requires_grad_output = bert_tiny_model.encoder.layer[0].output.dense.weight.requires_grad
+        old_requires_grad_intermediate = bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad
+        old_requires_grad_output = bert_test_model.encoder.layer[0].output.dense.weight.requires_grad
 
         # prune
-        prune_ffn_layers(bert_tiny_model, layers_to_prune)
+        prune_ffn_layers(bert_test_model, layers_to_prune)
 
         # check that the model requires grad
-        assert bert_tiny_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
-        assert bert_tiny_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
+        assert bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
+        assert bert_test_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
 
-    def test_same_as_nullify(self, bert_tiny_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             layers_to_prune = [0]
 
             # nullify first layer
-            nullified_model = copy.deepcopy(bert_tiny_model)
+            nullified_model = copy.deepcopy(bert_test_model)
             nullify_ffn_layers(nullified_model, layers_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the nullified model is different from the original model
+            # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # prune the first layer
-            prune_ffn_layers(bert_tiny_model, layers_to_prune)
+            prune_ffn_layers(bert_test_model, layers_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
-            # check that the output of the pruned model is different from the original model
+            # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
 
-            # check that the output of the pruned model is the same as the nullified model
+            # check the output of the pruned model is the same as the nullified model
             assert torch.allclose(pruned_last_hidden_state, nullified_last_hidden_state)
 
 
@@ -338,36 +339,36 @@ class TestPruneHiddenState:
     @pytest.mark.parametrize(
         "neurons_to_prune, expected_hidden_state",
         [
-            ([], 128),
-            ([0], 127),
-            ([0, 1], 126),
-            ([0, 1, 2], 125),
-            (list(range(120)), 8),
-            ([0, 1, 127, *range(10, 20)], 115),
+            ([], 64),
+            ([0], 63),
+            ([0, 1], 62),
+            ([0, 1, 2], 61),
+            (list(range(60)), 4),
+            ([0, 1, 51, *range(10, 20)], 51),
         ]
     )
     def test_num_neurons(
-        self, bert_tiny_model: PreTrainedModel, neurons_to_prune: list[int], expected_hidden_state: int,
+        self, bert_test_model: PreTrainedModel, neurons_to_prune: list[int], expected_hidden_state: int,
     ) -> None:
-        self._assert_hidden_state_neurons_number(bert_tiny_model, 128)
+        self._assert_hidden_state_neurons_number(bert_test_model, 64)
 
-        do_prune_hidden_state(bert_tiny_model, neurons_to_prune)
+        prune_hidden_state(bert_test_model, neurons_to_prune)
 
-        self._assert_hidden_state_neurons_number(bert_tiny_model, expected_hidden_state)
+        self._assert_hidden_state_neurons_number(bert_test_model, expected_hidden_state)
 
-    def test_pass_with_correct_dim(self, bert_tiny_model: PreTrainedModel, random_input_batch) -> None:
+    def test_pass_with_correct_dim(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
         # get output of the original model
-        original_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
-        assert original_last_hidden_state.shape == (*random_input_batch["input_ids"].shape, bert_tiny_model.config.hidden_size)
+        original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+        assert original_last_hidden_state.shape == (*random_input_batch["input_ids"].shape, bert_test_model.config.hidden_size)
 
         # set params
-        neurons_to_prune = [0, 1, 127, *range(10, 20)]
+        neurons_to_prune = [0, 1, 63, *range(10, 20)]
 
         # prune the hidden state
-        do_prune_hidden_state(bert_tiny_model, neurons_to_prune)
+        prune_hidden_state(bert_test_model, neurons_to_prune)
         # get output of the pruned model
-        pruned_last_hidden_state = bert_tiny_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
-        assert pruned_last_hidden_state.shape == (*random_input_batch["input_ids"].shape, 115)
+        pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+        assert pruned_last_hidden_state.shape == (*random_input_batch["input_ids"].shape, 51)
 
 
 

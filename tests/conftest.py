@@ -1,55 +1,100 @@
 import pytest
 import torch
 from torch.utils.data import DataLoader
-from transformers import PreTrainedTokenizer, PreTrainedModel, DataCollatorWithPadding
+from transformers import PreTrainedTokenizer, PreTrainedModel, DataCollatorWithPadding, PretrainedConfig
 from datasets import Dataset
 
 
-# Fixtures
-
-
-HF_BERT_TINY = "prajjwal1/bert-tiny"
+HF_TINY_BERT = "prajjwal1/bert-tiny"
 
 
 @pytest.fixture
-def bert_tiny_tokenizer() -> PreTrainedTokenizer:
+def bert_test_config() -> PretrainedConfig:
+    from transformers import BertConfig
+    return BertConfig(
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        hidden_size=64,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        vocab_size=4096,
+        type_vocab_size=2,
+        hidden_dropout_prob=0.1,
+        attention_probs_dropout_prob=0.1,
+        num_labels=3,
+    )
+
+
+@pytest.fixture
+def bert_test_tokenizer(bert_test_config: PretrainedConfig) -> PreTrainedTokenizer:
     from transformers import BertTokenizer
-    try:
-        tokenizer = BertTokenizer.from_pretrained(HF_BERT_TINY, local_files_only=True)
-    except Exception:
-        tokenizer = BertTokenizer.from_pretrained(HF_BERT_TINY, local_files_only=False)
+    tokenizer = BertTokenizer.from_pretrained(HF_TINY_BERT)
+    # reduce vocab size to match the config
+    tokenizer.vocab = {k: v for k, v in tokenizer.vocab.items() if v < bert_test_config.vocab_size}
     return tokenizer
 
 
-@pytest.fixture
-def bert_tiny_model() -> PreTrainedModel:
+@pytest.fixture()
+def bert_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import BertModel
-    try:
-        model = BertModel.from_pretrained(HF_BERT_TINY, local_files_only=True)
-    except Exception:
-        model = BertModel.from_pretrained(HF_BERT_TINY, local_files_only=False)
+    model = BertModel(bert_test_config)
+    # init weights as random with a fixed seed
+    generator = torch.Generator().manual_seed(42)
+    for p in model.parameters():
+        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+    model.eval()
     return model
 
 
 @pytest.fixture
-def bert_tiny_clf_model() -> PreTrainedModel:
-    from transformers import BertForSequenceClassification, BertConfig
-    try:
-        config = BertConfig.from_pretrained(HF_BERT_TINY, num_labels=3, local_files_only=True)
-        model = BertForSequenceClassification.from_pretrained(HF_BERT_TINY, config=config, local_files_only=True)
-    except Exception:
-        config = BertConfig.from_pretrained(HF_BERT_TINY, num_labels=3, local_files_only=False)
-        model = BertForSequenceClassification.from_pretrained(HF_BERT_TINY, config=config, local_files_only=False)
-    return model
-
-
-@pytest.fixture
-def bert_tiny_lm_model() -> PreTrainedModel:
+def bert_lm_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import BertForMaskedLM
-    try:
-        model = BertForMaskedLM.from_pretrained(HF_BERT_TINY, local_files_only=True)
-    except Exception:
-        model = BertForMaskedLM.from_pretrained(HF_BERT_TINY, local_files_only=False)
+    model = BertForMaskedLM(bert_test_config)
+    # init weights as random with a fixed seed
+    generator = torch.Generator().manual_seed(42)
+    for p in model.parameters():
+        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+    model.eval()
+    return model
+
+
+@pytest.fixture
+def bert_clf_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
+    from transformers import BertForSequenceClassification
+    model = BertForSequenceClassification(bert_test_config)
+    # init weights as random with a fixed seed
+    generator = torch.Generator().manual_seed(42)
+    for p in model.parameters():
+        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+    model.eval()
+    return model
+
+
+@pytest.fixture
+def llama_test_config() -> PretrainedConfig:
+    from transformers import LlamaConfig
+    return LlamaConfig(
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        hidden_size=64,
+        intermediate_size=128,
+        max_position_embeddings=128,
+        vocab_size=4096,
+        hidden_dropout_prob=0.1,
+        attention_probs_dropout_prob=0.1
+    )
+
+
+@pytest.fixture
+def llama_lm_test_model(llama_test_config: PretrainedConfig) -> PreTrainedModel:
+    from transformers import LlamaForCausalLM
+    model = LlamaForCausalLM(llama_test_config)
+    # init weights as random with a fixed seed
+    generator = torch.Generator().manual_seed(42)
+    for p in model.parameters():
+        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+    model.eval()
     return model
 
 
@@ -87,7 +132,7 @@ def random_input_batch() -> dict[str, torch.Tensor]:
 
 
 @pytest.fixture
-def random_dataloader(bert_tiny_tokenizer: PreTrainedTokenizer) -> DataLoader:
+def random_dataloader(bert_test_tokenizer: PreTrainedTokenizer) -> DataLoader:
     return DataLoader(
         Dataset.from_list([
             {
@@ -97,7 +142,7 @@ def random_dataloader(bert_tiny_tokenizer: PreTrainedTokenizer) -> DataLoader:
             }
             for _ in range(8)
         ]),
-        collate_fn=DataCollatorWithPadding(tokenizer=bert_tiny_tokenizer),
+        collate_fn=DataCollatorWithPadding(tokenizer=bert_test_tokenizer),
         batch_size=4,
     )
 

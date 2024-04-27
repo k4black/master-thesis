@@ -1,25 +1,61 @@
 import warnings
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, LlamaForCausalLM
 from transformers.pytorch_utils import prune_linear_layer
 
 
-def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list[int]]) -> None:
+def llama_prune_out_channels(layer: nn.Module, heads_indexes: Sequence[int], num_heads: int, head_dim: int) -> nn.Module:
+    # print("Prune IDX in HFAttentionPruner: ", idxs)
+    # convert head indexes to neuron indexes e.g [0] -> [0, .., head_dim-1]
+    idxs = [i * layer.head_dim + j for i in heads_indexes for j in range(head_dim)]
+    assert len(idxs) % num_heads == 0
+    for sub_layer in [layer.o_proj]:
+        keep_idxs = list(set(range(sub_layer.out_features)) - set(idxs))
+        keep_idxs.sort()
+        sub_layer.out_features = sub_layer.out_features - len(idxs)
+
+        sub_layer.weight = torch.nn.Parameter(sub_layer.weight.data[keep_idxs])
+        if sub_layer.bias is not None:
+            sub_layer.bias = torch.nn.Parameter(sub_layer.bias.data[keep_idxs])
+
+    for sub_layer in [layer.q_proj, layer.k_proj, layer.v_proj]:
+        keep_idxs = list(set(range(sub_layer.in_features)) - set(idxs))
+        keep_idxs.sort()
+        sub_layer.in_features = sub_layer.in_features - len(idxs)
+        sub_layer.weight = torch.nn.Parameter(
+            sub_layer.weight.data[:, keep_idxs]
+        )
+
+    return layer
+
+
+def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list[int]], architecture: str = "bert",) -> None:
     """
     Prune the specified attention heads in the model.
     Can remove all the attention heads in the specified layers.
 
     :param model: The transformers pytorch model to prune
     :param heads_to_prune: A dictionary with the layer indices as keys and a list of head indices to prune as values
+    :param architecture: The architecture of the model
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # ignore "no-op" warning when pruning all heads in a layer
-        model.prune_heads(heads_to_prune)
+        if architecture == "bert":
+            model.prune_heads(heads_to_prune)
+        elif architecture == "llama":
+            print(model)
+            for layer_index, heads in heads_to_prune.items():
+                head_dim = model.config.hidden_size // model.config.num_attention_heads
+                model.layers[layer_index].self_attn = llama_prune_out_channels(
+                    model.layers[layer_index].self_attn, heads, model.config.num_attention_heads, head_dim
+                )
+            print(model)
 
 
-def prune_attention_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None:
+def prune_attention_layers(model: PreTrainedModel, layers_to_prune: list[int], architecture: str = "bert",) -> None:
     """
     Prune the specified attention layers in the model.
     Simply delete all the attention heads in the specified layers.
@@ -37,7 +73,7 @@ def prune_attention_layers(model: PreTrainedModel, layers_to_prune: list[int]) -
         model.encoder.layer[layer_index].attention.output.dense.bias = None
 
 
-def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[int]]) -> None:
+def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[int]], architecture: str = "bert",) -> None:
     """
     Prune the specified feed forward neurons in the model.
 
@@ -47,28 +83,62 @@ def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[i
     for layer_index, neurons in neurons_to_prune.items():
         neurons_indexes_to_keep = torch.LongTensor(list(set(range(model.config.intermediate_size)) - set(neurons)))
 
-        for name, dim in [("intermediate", 0), ("output", 1)]:
-            param = model.encoder.layer[layer_index].__getattr__(name)
+        if architecture == 'bert':
+            layer = model.encoder.layer[layer_index]
 
-            param.dense = prune_linear_layer(
-                param.dense,
+            layer.intermediate.dense = prune_linear_layer(
+                layer.intermediate.dense,
                 neurons_indexes_to_keep,
-                dim=dim,
+                dim=0,
             )
-            # code in `prune_linear_layer` slow down the inference
-            # so re-create nn.Linear with the same weight and bias
-            weights = param.dense.weight
-            bias = param.dense.bias
-            param.dense = nn.Linear(
-                param.dense.in_features,
-                param.dense.out_features,
-                device=param.dense.weight.device,
+            layer.output.dense = prune_linear_layer(
+                layer.output.dense,
+                neurons_indexes_to_keep,
+                dim=1,
             )
-            param.dense.weight = nn.Parameter(weights, requires_grad=weights.requires_grad)
-            param.dense.bias = nn.Parameter(bias, requires_grad=bias.requires_grad)
+        elif architecture == 'llama':
+            layer = model.layers[layer_index].mlp
+
+            layer.gate_proj = prune_linear_layer(
+                layer.gate_proj,
+                neurons_indexes_to_keep,
+                dim=0,
+            )
+            layer.up_proj = prune_linear_layer(
+                layer.up_proj,
+                neurons_indexes_to_keep,
+                dim=0,
+            )
+            layer.down_proj = prune_linear_layer(
+                layer.down_proj,
+                neurons_indexes_to_keep,
+                dim=1,
+            )
+        else:
+            raise ValueError(f"Unsupported architecture: {architecture}")
+
+        # for module, dim in what_to_prune:
+        #     param = layer.__getattr__(name)
+        #
+        #     param.dense = prune_linear_layer(
+        #         param.dense,
+        #         neurons_indexes_to_keep,
+        #         dim=dim,
+        #     )
+            # # code in `prune_linear_layer` slow down the inference
+            # # so re-create nn.Linear with the same weight and bias
+            # weights = param.dense.weight
+            # bias = param.dense.bias
+            # param.dense = nn.Linear(
+            #     param.dense.in_features,
+            #     param.dense.out_features,
+            #     device=param.dense.weight.device,
+            # )
+            # param.dense.weight = nn.Parameter(weights, requires_grad=weights.requires_grad)
+            # param.dense.bias = nn.Parameter(bias, requires_grad=bias.requires_grad)
 
 
-def prune_ffn_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None:
+def prune_ffn_layers(model: PreTrainedModel, layers_to_prune: list[int], architecture: str = "bert",) -> None:
     """
     Prune the specified feed forward layers in the model.
     Simply replace the feed forward layers with a no-op n-0 and 0-m linear layers.
@@ -128,7 +198,7 @@ def _prune_layer_norm(layer: nn.LayerNorm, index: torch.LongTensor) -> nn.LayerN
     return new_layer
 
 
-def do_prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int]) -> None:
+def prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int], architecture: str = "bert",) -> None:
     """
     Prune specific neurons from all hidden states along the model, including embeddings layer
 
