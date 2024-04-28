@@ -17,35 +17,72 @@ from adaptive_pruning.utils import (
 class TestPruneAttentionHeads:
     @staticmethod
     def _assert_attention_heads_number_by_layer(model: PreTrainedModel, expected_heads: list[int]) -> None:
+        model = model.base_model
         head_size = model.config.hidden_size // model.config.num_attention_heads
 
-        for i, layer in enumerate(model.encoder.layer):
-            assert layer.attention.self.num_attention_heads == expected_heads[i], \
-                f"Layer {i}: expected {expected_heads[i]} heads, got {layer.attention.self.num_attention_heads}"
+        if model.config.model_type == "bert":
+            for i, layer in enumerate(model.encoder.layer):
+                assert layer.attention.self.num_attention_heads == expected_heads[i], \
+                    f"Layer {i}: expected {expected_heads[i]} heads, got {layer.attention.self.num_attention_heads}"
 
-            assert layer.attention.self.query.out_features == head_size * expected_heads[i], f"Layer {i}"
-            assert layer.attention.output.dense.in_features == head_size * expected_heads[i], f"Layer {i}"
+                assert layer.attention.self.query.out_features == head_size * expected_heads[i], f"Layer {i}"
+                assert layer.attention.output.dense.in_features == head_size * expected_heads[i], f"Layer {i}"
+
+        elif model.config.model_type == "llama":
+            num_heads_per_group = model.config.num_attention_heads // model.config.num_key_value_heads
+            for i, layer in enumerate(model.layers):
+                assert layer.self_attn.num_heads == expected_heads[i], \
+                    f"Layer {i}: expected {expected_heads[i]} heads, got {layer.self_attn.num_heads}"
+                assert layer.self_attn.num_key_value_heads == expected_heads[i] // num_heads_per_group, \
+                    f"Layer {i}: expected {expected_heads[i] // num_heads_per_group} key-value heads, got {layer.self_attn.num_key_value_heads}"
+
+                assert layer.self_attn.q_proj.out_features == head_size * expected_heads[i], f"Layer {i} q_proj error"
+                assert layer.self_attn.k_proj.out_features == head_size * expected_heads[i] // num_heads_per_group, f"Layer {i} k_proj error"
+                assert layer.self_attn.v_proj.out_features == head_size * expected_heads[i] // num_heads_per_group, f"Layer {i} v_proj error"
+                assert layer.self_attn.o_proj.in_features == head_size * expected_heads[i], f"Layer {i} o_proj error"
 
     @pytest.mark.parametrize(
         "heads_to_prune, expected_heads",
         [
             ({}, [4, 4]),
             ({0: [0]}, [3, 4]),
+            ({0: [3]}, [3, 4]),
             ({0: [0], 1: [0]}, [3, 3]),
             ({0: [0, 1], 1: [0, 1]}, [2, 2]),
             ({0: [0, 1, 2, 3], 1: [0, 1, 2, 3]}, [0, 0]),
         ],
     )
-    def test_num_heads(
-        self, bert_test_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
+    def test_num_heads_bert(
+        self, bert_lm_test_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
     ) -> None:
-        self._assert_attention_heads_number_by_layer(bert_test_model, [4, 4])
+        self._assert_attention_heads_number_by_layer(bert_lm_test_model, [4, 4])
 
-        prune_attention_heads(bert_test_model, heads_to_prune)
+        prune_attention_heads(bert_lm_test_model, heads_to_prune)
 
-        self._assert_attention_heads_number_by_layer(bert_test_model, expected_heads)
+        self._assert_attention_heads_number_by_layer(bert_lm_test_model, expected_heads)
 
-    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
+    # grouped heads are used, so round to prune grouped heads only as the structure
+    @pytest.mark.parametrize(
+        "heads_to_prune, expected_heads",
+        [
+            ({}, [4, 4]),
+            ({0: [0]}, [2, 4]),
+            ({0: [3]}, [2, 4]),
+            ({0: [0], 1: [0]}, [2, 2]),
+            ({0: [0, 1], 1: [0, 3]}, [2, 0]),
+            ({0: [0, 1, 2, 3], 1: [0, 1, 2, 3]}, [0, 0]),
+        ],
+    )
+    def test_num_heads_llama(
+        self, llama_lm_test_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
+    ) -> None:
+        self._assert_attention_heads_number_by_layer(llama_lm_test_model, [4, 4])
+
+        prune_attention_heads(llama_lm_test_model, heads_to_prune)
+
+        self._assert_attention_heads_number_by_layer(llama_lm_test_model, expected_heads)
+
+    def test_requires_grad_bert(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         heads_to_prune = {0: [0]}
 
@@ -60,18 +97,18 @@ class TestPruneAttentionHeads:
         assert bert_test_model.encoder.layer[0].attention.self.query.weight.requires_grad == old_requires_grad_query
         assert bert_test_model.encoder.layer[0].attention.self.query.bias.requires_grad == old_requires_grad_bias
 
-    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             head_index = 0
             heads_to_prune = {0: [head_index]}
 
             # nullify first head of the first layer
-            nullified_model = copy.deepcopy(bert_test_model)
+            nullified_model = copy.deepcopy(test_lm_model)
             nullify_attention_heads(nullified_model, heads_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
@@ -80,9 +117,9 @@ class TestPruneAttentionHeads:
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # prune the first head of the first layer
-            prune_attention_heads(bert_test_model, heads_to_prune)
+            prune_attention_heads(test_lm_model, heads_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
@@ -94,11 +131,22 @@ class TestPruneAttentionHeads:
 class TestAttentionLayerPruning:
     @staticmethod
     def _assert_attention_layers_existence(model: PreTrainedModel, expected_layers: list[bool]) -> None:
-        for i, layer in enumerate(model.encoder.layer):
-            if expected_layers[i]:
-                assert layer.attention.output.dense.in_features == model.config.hidden_size
-            else:
-                assert layer.attention.output.dense.in_features == 0
+        model, architecture = model.base_model, model.config.model_type
+
+        if architecture == "bert":
+            for i, layer in enumerate(model.encoder.layer):
+                if expected_layers[i]:
+                    assert layer.attention.output.dense.in_features == model.config.hidden_size
+                else:
+                    assert layer.attention.output.dense.in_features == 0
+        elif architecture == "llama":
+            for i, layer in enumerate(model.layers):
+                if expected_layers[i]:
+                    assert layer.self_attn.o_proj.in_features == model.config.hidden_size
+                else:
+                    assert layer.self_attn.o_proj.in_features == 0
+        else:
+            raise ValueError(f"Unsupported architecture: {architecture}")
 
     @pytest.mark.parametrize(
         "layers_to_prune, expected_layers",
@@ -109,15 +157,15 @@ class TestAttentionLayerPruning:
         ],
     )
     def test_layer_pruning(
-        self, bert_test_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
+        self, test_lm_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
     ) -> None:
-        self._assert_attention_layers_existence(bert_test_model, [True, True])
+        self._assert_attention_layers_existence(test_lm_model, [True, True])
 
-        prune_attention_layers(bert_test_model, layers_to_prune)
+        prune_attention_layers(test_lm_model, layers_to_prune)
 
-        self._assert_attention_layers_existence(bert_test_model, expected_layers)
+        self._assert_attention_layers_existence(test_lm_model, expected_layers)
 
-    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
+    def test_requires_grad_bert(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         layers_to_prune = [0]
 
@@ -130,18 +178,18 @@ class TestAttentionLayerPruning:
         # check that the model requires grad
         assert bert_test_model.encoder.layer[0].attention.output.dense.weight.requires_grad == old_requires_grad
 
-    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             layer_index = 0
             layers_to_prune = [layer_index]
 
             # nullify first layer
-            nullified_model = copy.deepcopy(bert_test_model)
+            nullified_model = copy.deepcopy(test_lm_model)
             nullify_attention_layers(nullified_model, layers_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
@@ -150,9 +198,9 @@ class TestAttentionLayerPruning:
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # prune the first layer
-            prune_attention_layers(bert_test_model, layers_to_prune)
+            prune_attention_layers(test_lm_model, layers_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
@@ -164,11 +212,26 @@ class TestAttentionLayerPruning:
 class TestPruneFeedForwardNeurons:
     @staticmethod
     def _assert_feed_forward_neurons_number_by_layer(model: PreTrainedModel, expected_neurons: list[int]) -> None:
-        for i, layer in enumerate(model.encoder.layer):
-            assert layer.intermediate.dense.out_features == expected_neurons[i], \
-                f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.intermediate.dense.out_features}"
-            assert layer.output.dense.in_features == expected_neurons[i], \
-                f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.output.dense.in_features}"
+        model, architecture = model.base_model, model.config.model_type
+
+        if architecture == "bert":
+            for i, layer in enumerate(model.encoder.layer):
+                assert layer.intermediate.dense.out_features == expected_neurons[i], \
+                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.intermediate.dense.out_features}"
+                assert layer.output.dense.in_features == expected_neurons[i], \
+                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.output.dense.in_features}"
+
+        elif architecture == "llama":
+            for i, layer in enumerate(model.layers):
+                assert layer.mlp.gate_proj.out_features == expected_neurons[i], \
+                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.gate_proj.out_features}"
+                assert layer.mlp.up_proj.out_features == expected_neurons[i], \
+                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.up_proj.out_features}"
+                assert layer.mlp.down_proj.in_features == expected_neurons[i], \
+                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.down_proj.in_features}"
+
+        else:
+            raise ValueError(f"Unsupported architecture: {architecture}")
 
     @pytest.mark.parametrize(
         "neurons_to_prune, expected_neurons",
@@ -181,15 +244,15 @@ class TestPruneFeedForwardNeurons:
         ],
     )
     def test_num_neurons(
-        self, bert_test_model: PreTrainedModel, neurons_to_prune: dict[int, list[int]], expected_neurons: list[int],
+        self, test_lm_model: PreTrainedModel, neurons_to_prune: dict[int, list[int]], expected_neurons: list[int],
     ) -> None:
-        self._assert_feed_forward_neurons_number_by_layer(bert_test_model, [128, 128])
+        self._assert_feed_forward_neurons_number_by_layer(test_lm_model, [128, 128])
 
-        prune_ffn_neurons(bert_test_model, neurons_to_prune)
+        prune_ffn_neurons(test_lm_model, neurons_to_prune)
 
-        self._assert_feed_forward_neurons_number_by_layer(bert_test_model, expected_neurons)
+        self._assert_feed_forward_neurons_number_by_layer(test_lm_model, expected_neurons)
 
-    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
+    def test_requires_grad_bert(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         neurons_to_prune = {0: [0, 10, *range(50, 60), 127]}
 
@@ -204,17 +267,17 @@ class TestPruneFeedForwardNeurons:
         assert bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
         assert bert_test_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
 
-    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             neurons_to_prune = {0: [0, 10, *range(50, 60), 127]}
 
             # nullify first neuron of the first layer
-            nullified_model = copy.deepcopy(bert_test_model)
+            nullified_model = copy.deepcopy(test_lm_model)
             nullify_ffn_neurons(nullified_model, neurons_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
@@ -224,9 +287,9 @@ class TestPruneFeedForwardNeurons:
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state, atol=1e-5)
 
             # prune the first neuron of the first layer
-            prune_ffn_neurons(bert_test_model, neurons_to_prune)
+            prune_ffn_neurons(test_lm_model, neurons_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # check the output of the pruned model is different from the original model
             assert original_last_hidden_state.shape == pruned_last_hidden_state.shape
@@ -240,18 +303,40 @@ class TestPruneFeedForwardNeurons:
 class TestPruneFeedForwardLayers:
     @staticmethod
     def _assert_feed_forward_layers_existence(model: PreTrainedModel, expected_layers: list[bool]) -> None:
-        for i, layer in enumerate(model.encoder.layer):
-            if expected_layers[i]:
-                assert layer.intermediate.dense.out_features == model.config.intermediate_size, \
-                    (f"Layer {i} expected {model.config.intermediate_size} neurons, "
-                     f"got {layer.intermediate.dense.out_features}")
-                assert layer.output.dense.in_features == model.config.intermediate_size, \
-                    f"Layer {i} expected {model.config.intermediate_size} neurons, got {layer.output.dense.in_features}"
-            else:
-                assert layer.intermediate.dense.out_features == 0, \
-                    f"Layer {i} expected 0 neurons, got {layer.intermediate.dense.out_features}"
-                assert layer.output.dense.in_features == 0, \
-                    f"Layer {i} expected 0 neurons, got {layer.output.dense.in_features}"
+        model, architecture = model.base_model, model.config.model_type
+
+        if architecture == "bert":
+            for i, layer in enumerate(model.encoder.layer):
+                if expected_layers[i]:
+                    assert layer.intermediate.dense.out_features == model.config.intermediate_size, \
+                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                         f"got {layer.intermediate.dense.out_features}")
+                    assert layer.output.dense.in_features == model.config.intermediate_size, \
+                        f"Layer {i} expected {model.config.intermediate_size} neurons, got {layer.output.dense.in_features}"
+                else:
+                    assert layer.intermediate.dense.out_features == 0, \
+                        f"Layer {i} expected 0 neurons, got {layer.intermediate.dense.out_features}"
+                    assert layer.output.dense.in_features == 0, \
+                        f"Layer {i} expected 0 neurons, got {layer.output.dense.in_features}"
+        elif architecture == "llama":
+            for i, layer in enumerate(model.layers):
+                if expected_layers[i]:
+                    assert layer.mlp.gate_proj.out_features == model.config.intermediate_size, \
+                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                         f"got {layer.mlp.gate_proj.out_features}")
+                    assert layer.mlp.up_proj.out_features == model.config.intermediate_size, \
+                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                         f"got {layer.mlp.up_proj.out_features}")
+                    assert layer.mlp.down_proj.in_features == model.config.intermediate_size, \
+                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                            f"got {layer.mlp.down_proj.in_features}")
+                else:
+                    assert layer.mlp.gate_proj.out_features == 0, \
+                        f"Layer {i} expected 0 neurons, got {layer.mlp.gate_proj.out_features}"
+                    assert layer.mlp.up_proj.out_features == 0, \
+                        f"Layer {i} expected 0 neurons, got {layer.mlp.up_proj.out_features}"
+                    assert layer.mlp.down_proj.in_features == 0, \
+                        f"Layer {i} expected 0 neurons, got {layer.mlp.down_proj.in_features}"
 
     @pytest.mark.parametrize(
         "layers_to_prune, expected_layers",
@@ -262,15 +347,15 @@ class TestPruneFeedForwardLayers:
         ],
     )
     def test_layer_pruning(
-        self, bert_test_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
+        self, test_lm_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
     ) -> None:
-        self._assert_feed_forward_layers_existence(bert_test_model, [True, True])
+        self._assert_feed_forward_layers_existence(test_lm_model, [True, True])
 
-        prune_ffn_layers(bert_test_model, layers_to_prune)
+        prune_ffn_layers(test_lm_model, layers_to_prune)
 
-        self._assert_feed_forward_layers_existence(bert_test_model, expected_layers)
+        self._assert_feed_forward_layers_existence(test_lm_model, expected_layers)
 
-    def test_requires_grad(self, bert_test_model: PreTrainedModel) -> None:
+    def test_requires_grad_bert(self, bert_test_model: PreTrainedModel) -> None:
         # set params
         layers_to_prune = [0]
 
@@ -285,17 +370,17 @@ class TestPruneFeedForwardLayers:
         assert bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
         assert bert_test_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
 
-    def test_same_as_nullify(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
+    def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
         
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # set params
             layers_to_prune = [0]
 
             # nullify first layer
-            nullified_model = copy.deepcopy(bert_test_model)
+            nullified_model = copy.deepcopy(test_lm_model)
             nullify_ffn_layers(nullified_model, layers_to_prune)
             # get output of the nullified model
             nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
@@ -304,9 +389,9 @@ class TestPruneFeedForwardLayers:
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # prune the first layer
-            prune_ffn_layers(bert_test_model, layers_to_prune)
+            prune_ffn_layers(test_lm_model, layers_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
 
             # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
@@ -318,23 +403,28 @@ class TestPruneFeedForwardLayers:
 class TestPruneHiddenState:
     @staticmethod
     def _assert_hidden_state_neurons_number(model: PreTrainedModel, expected_hidden_state: int) -> None:
+        model, architecture = model.base_model, model.config.model_type
+
         assert model.config.hidden_size == expected_hidden_state
 
-        # embedding layer
-        assert model.embeddings.word_embeddings.weight.shape[1] == expected_hidden_state
-        assert model.embeddings.position_embeddings.weight.shape[1] == expected_hidden_state
-        assert model.embeddings.token_type_embeddings.weight.shape[1] == expected_hidden_state
+        if architecture == "bert":
+            # embedding layer
+            assert model.embeddings.word_embeddings.weight.shape[1] == expected_hidden_state
+            assert model.embeddings.position_embeddings.weight.shape[1] == expected_hidden_state
+            assert model.embeddings.token_type_embeddings.weight.shape[1] == expected_hidden_state
 
-        # main layers
-        for layer in model.encoder.layer:
-            assert layer.attention.self.query.in_features == expected_hidden_state
-            assert layer.attention.self.key.in_features == expected_hidden_state
-            assert layer.attention.self.value.in_features == expected_hidden_state
-            assert layer.intermediate.dense.in_features == expected_hidden_state
-            assert layer.output.dense.out_features == expected_hidden_state
+            # main layers
+            for layer in model.encoder.layer:
+                assert layer.attention.self.query.in_features == expected_hidden_state
+                assert layer.attention.self.key.in_features == expected_hidden_state
+                assert layer.attention.self.value.in_features == expected_hidden_state
+                assert layer.intermediate.dense.in_features == expected_hidden_state
+                assert layer.output.dense.out_features == expected_hidden_state
 
-        # pooler
-        assert model.pooler.dense.in_features == expected_hidden_state
+            # pooler
+            assert model.pooler.dense.in_features == expected_hidden_state
+        else:
+            raise ValueError(f"Unsupported architecture: {architecture}")
 
     @pytest.mark.parametrize(
         "neurons_to_prune, expected_hidden_state",

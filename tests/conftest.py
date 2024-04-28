@@ -41,7 +41,7 @@ def bert_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
     for p in model.parameters():
-        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+        torch.nn.init.uniform_(p, -1.0, 1.0, generator=generator)
     model.eval()
     return model
 
@@ -53,7 +53,7 @@ def bert_lm_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
     for p in model.parameters():
-        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+        torch.nn.init.uniform_(p, -1.0, 1.0, generator=generator)
     model.eval()
     return model
 
@@ -65,7 +65,7 @@ def bert_clf_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
     for p in model.parameters():
-        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+        torch.nn.init.uniform_(p, -1.0, 1.0, generator=generator)
     model.eval()
     return model
 
@@ -93,9 +93,21 @@ def llama_lm_test_model(llama_test_config: PretrainedConfig) -> PreTrainedModel:
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
     for p in model.parameters():
-        torch.nn.init.uniform_(p, -10.0, 10.0, generator=generator)
+        torch.nn.init.uniform_(p, -1.0, 1.0, generator=generator)
     model.eval()
     return model
+
+
+@pytest.fixture(params=["bert", "llama"])
+def test_lm_model(
+        request: pytest.FixtureRequest, bert_lm_test_model: PreTrainedModel, llama_lm_test_model: PreTrainedModel
+) -> PreTrainedModel:
+    if request.param == "bert":
+        return bert_lm_test_model
+    elif request.param == "llama":
+        return llama_lm_test_model
+    else:
+        raise ValueError(f"Unknown model type: {request.param}")
 
 
 @pytest.fixture
