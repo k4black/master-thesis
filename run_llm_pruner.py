@@ -1,19 +1,20 @@
 import os
-import gc
 import copy
 from pathlib import Path
 import typing
 
 import click
+import neptune
 import torch
 from transformers import LlamaTokenizer
-from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
+# from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 if typing.TYPE_CHECKING:
     import external.llm_pruner.LLMPruner.torch_pruning as tp
     from external.llm_pruner.LLMPruner.pruner import hf_llama_pruner as llama_pruner
     from external.llm_pruner.LLMPruner.utils.logger import LoggerWithDepth
     from external.llm_pruner.LLMPruner.datasets.example_samples import get_examples
+    from external.llm_pruner.LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
 else:
     # add external.llm_pruner to access LLMPruner
     os.sys.path.append((Path(__file__).parent / "external" / "llm_pruner").as_posix())
@@ -21,7 +22,8 @@ else:
     from LLMPruner.pruner import hf_llama_pruner as llama_pruner
     from LLMPruner.utils.logger import LoggerWithDepth
     from LLMPruner.datasets.example_samples import get_examples
-from utils import set_random_seed, lm_eval_hf_model
+    from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
+from utils import set_random_seed, evaluate_model
 
 
 @click.command()
@@ -87,6 +89,26 @@ def main(
 ):
     set_random_seed(seed)
 
+    # setup logging
+    neptune_run = neptune.init_run(tags=['llm-pruner', base_model, 'block_wise' if block_wise else 'channel_wise' if channel_wise else 'layer_wise'])
+    method = [
+        "attn-heads+ffn-neurons" if block_wise else None,
+        "hidden-state" if channel_wise else None,
+        "attn-layers+ffn-layers" if layer_wise else None,
+        pruner_type,
+    ]
+    method = "+".join([m for m in method if m ])
+    neptune_run["parameters"] = {
+        "base_model": base_model,
+        "lib": "llm-pruner",
+        "method": method,
+        "ratio": pruning_ratio,
+        "pruning_components": "attn-heads+ffn-neurons" if block_wise else "hidden-state" if channel_wise else "attn-layers+ffn-layers" if layer_wise else "attn-heads+ffn-neurons",
+        "how_to_collect": pruner_type,
+        "how_to_average": taylor,
+        "num_samples": num_examples,
+    }
+
     logger = LoggerWithDepth(
         env_name=f"{save_ckpt_log_name}",
         config={},
@@ -116,6 +138,13 @@ def main(
             [1, 3439, 17632, 1925, 29892, 278, 6368, 310],
         ]
     ).to(device)
+    # print('-'*64)
+    # print(model)
+    # summary(model, input_data=forward_prompts, depth=4, device=device)
+    # for i, layer in enumerate(model.model.layers):
+    #     print(f"Layer {i}")
+    #     print(f"  Attention: {layer.self_attn.q_proj.weight.shape} (q_proj), {layer.self_attn.k_proj.weight.shape} (k_proj), {layer.self_attn.v_proj.weight.shape} (v_proj), {layer.self_attn.o_proj.weight.shape} (o_proj)")
+    #     print(f"  MLP: {layer.mlp.gate_proj.weight.shape} (gate_proj), {layer.mlp.up_proj.weight.shape} (up_proj), {layer.mlp.down_proj.weight.shape} (down_proj)")
 
     if pruner_type == "random":
         imp = tp.importance.RandomImportance()
@@ -225,7 +254,7 @@ def main(
             logger.log(f"Iter {i + 1}/{iterative_steps}")
 
             if pruner_type in ["taylor"]:
-                example_prompts = get_examples("bookcorpus", tokenizer, 10, seq_len=64)
+                example_prompts = get_examples("bookcorpus", tokenizer, n_samples=num_examples, seq_len=max_seq_len).to(device)
                 logger.log(f"Start Backwarding in iterative steps = {i}...")
                 loss = model(example_prompts, labels=example_prompts).loss
                 logger.log(f"Loss = {loss}")
@@ -261,9 +290,6 @@ def main(
         f"#Param before: {before_pruning_parameters}, #Param after: {after_pruning_parameters}, Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
     )
 
-    gc.collect()
-    torch.cuda.empty_cache()
-
     if save_model:
         logger.log(f"Save the pruned model as {logger.best_checkpoint_path}")
         model.half()
@@ -275,9 +301,14 @@ def main(
             logger.best_checkpoint_path,
         )
 
-    if eval_device != "cpu":
-        model.half()
-    model.to(eval_device)
+    print('-'*64)
+    print(model)
+    # summary(model, input_data=forward_prompts, depth=4, device=eval_device)
+    # go layer by layer and print actual size of model.model.layers[i].self_attn params and model.model.layers[i].mlp params
+    # for i, layer in enumerate(model.model.layers):
+    #     print(f"Layer {i}")
+    #     print(f"  Attention: {layer.self_attn.q_proj.weight.shape} (q_proj), {layer.self_attn.k_proj.weight.shape} (k_proj), {layer.self_attn.v_proj.weight.shape} (v_proj), {layer.self_attn.o_proj.weight.shape} (o_proj)")
+    #     print(f"  MLP: {layer.mlp.gate_proj.weight.shape} (gate_proj), {layer.mlp.up_proj.weight.shape} (up_proj), {layer.mlp.down_proj.weight.shape} (down_proj)")
 
     model.config.pad_token_id = tokenizer.pad_token_id = 0
     model.config.bos_token_id = 1
@@ -285,12 +316,14 @@ def main(
 
     if evaluate:
         logger.log("\n==================Evaluation after Pruning==================\n")
-        lm_eval_hf_model(
+        eval_results = evaluate_model(
             model=model,
             tokenizer=tokenizer,
+            inference_dataset='bookcorpus',
             name=save_ckpt_log_name,
             device=eval_device,
         )
+        neptune_run["evaluation"] = eval_results
 
 
 if __name__ == "__main__":

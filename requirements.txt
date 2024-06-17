@@ -1,16 +1,17 @@
 # huggingface
 transformers>=4.30.0,<5.0.0
 datasets>=2.10.0,<3.0.0
-tokenizers>=0.15.0,<0.16.0
-accelerate>=0.26.0,<0.27.0
-peft>=0.8.0,<0.9.0
+tokenizers>=0.15.0,<0.20.0
+accelerate>=0.26.0,<0.30.1
+peft>=0.8.0,<0.12.0
 torch>=2.0.0,<3.0.0
 
 # for metrics
 evaluate>=0.4.0,<0.5.0
 scipy
 scikit-learn
-lm-eval[vllm,accelerate]==0.4.2
+lm-eval[vllm]>=0.4.0,<0.5.0; sys_platform != "darwin"
+lm-eval>=0.4.0,<0.5.0; sys_platform == "darwin"
 calflops
 
 # utils
@@ -19,6 +20,7 @@ neptune>=1.8.0,<2.0.0
 torchinfo>=1.8.0,<2.0.0
 fvcore>=0.1.5,<0.2.0
 torch_pruning==1.3.7
+seaborn==0.13
 
 # distutils was removed in python 3.12, but used in transformers
 setuptools; python_version>="3.12"

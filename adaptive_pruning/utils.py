@@ -271,3 +271,7 @@ def nullify_hidden_state(model: PreTrainedModel, neurons_to_nullify: list[int]) 
 
     for layer in model.encoder.layer:
         raise NotImplementedError()
+
+
+def tensor_to_list(tensor: torch.Tensor) -> list:
+    return tensor.cpu().numpy().tolist()

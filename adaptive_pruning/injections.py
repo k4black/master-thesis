@@ -63,11 +63,25 @@ def inject_attention_head_mask(
                 _register_post_mask(model.encoder.layer[layer].attention.self, broadcast_head_mask, extra_mask=extra_mask)
             )
         elif architecture == "llama":
+            num_key_value_heads = model.config.num_key_value_heads
+            num_heads_per_key_value_head = model.config.num_attention_heads // num_key_value_heads
+            # head_mask of shape [num_attention_heads] shrink to have shape of [num_key_value_heads]
+            grouped_head_mask = head_mask[layer].view(-1, num_key_value_heads).prod(dim=0)
             # head_mask of shape [num_attention_heads] extend to have shape of [num_attention_heads*attention_head_size]
-            broadcast_head_mask = head_mask[layer].repeat_interleave(attention_head_size)
+            # grouped_head_mask of shape [num_key_value_heads] extend to have shape of [num_key_value_heads*attention_head_size]
+            broadcast_grouped_head_mask = grouped_head_mask.repeat_interleave(attention_head_size)
+            # broadcast_head_mask = head_mask[layer].repeat_interleave(attention_head_size)
+            assert broadcast_grouped_head_mask.shape == (model.config.num_key_value_heads * attention_head_size,)
+            # assert broadcast_head_mask.shape == (model.config.num_attention_heads * attention_head_size,)
             removable_handles.append(
-                _register_pre_mask(model.layers[layer].self_attn.o_proj, broadcast_head_mask, extra_mask=extra_mask)
+                _register_post_mask(model.layers[layer].self_attn.k_proj, broadcast_grouped_head_mask, extra_mask=extra_mask)
             )
+            removable_handles.append(
+                _register_post_mask(model.layers[layer].self_attn.v_proj, broadcast_grouped_head_mask, extra_mask=extra_mask)
+            )
+            # removable_handles.append(
+            #     _register_pre_mask(model.layers[layer].self_attn.o_proj, broadcast_head_mask, extra_mask=extra_mask)
+            # )
         else:
             raise ValueError(f"Unsupported architecture: {architecture}")
 
@@ -208,21 +222,43 @@ def inject_hidden_state_mask(
     model, architecture = model.base_model, model.config.model_type
     removable_handles = []
 
-    # embeddings
-    for name in ["word_embeddings", "position_embeddings", "token_type_embeddings"]:
-        removable_handles.append(_register_post_mask(model.embeddings.__getattr__(name), hidden_state_mask))
-        removable_handles.append(_register_pre_mask(model.embeddings.LayerNorm, hidden_state_mask))
+    if architecture == "bert":
+        # embeddings
+        for name in ["word_embeddings", "position_embeddings", "token_type_embeddings"]:
+            removable_handles.append(_register_post_mask(model.embeddings.__getattr__(name), hidden_state_mask))
+            removable_handles.append(_register_pre_mask(model.embeddings.LayerNorm, hidden_state_mask))
 
-    # encoder
-    for layer in range(model.config.num_hidden_layers):
-        # attentions
-        removable_handles.append(_register_pre_mask(model.encoder.layer[layer].attention.output, hidden_state_mask))
+        # encoder
+        for layer in range(model.config.num_hidden_layers):
+            # attentions
+            removable_handles.append(_register_pre_mask(model.encoder.layer[layer].attention.output, hidden_state_mask))
 
-        # ffn
-        removable_handles.append(_register_pre_mask(model.encoder.layer[layer].intermediate, hidden_state_mask))
-        removable_handles.append(_register_post_mask(model.encoder.layer[layer].output, hidden_state_mask))
+            # ffn
+            removable_handles.append(_register_pre_mask(model.encoder.layer[layer].intermediate, hidden_state_mask))
+            removable_handles.append(_register_post_mask(model.encoder.layer[layer].output, hidden_state_mask))
 
-    # pooler
-    removable_handles.append(_register_pre_mask(model.pooler, hidden_state_mask))
+        # pooler
+        removable_handles.append(_register_pre_mask(model.pooler, hidden_state_mask))
+    elif architecture == "llama":
+        # embeddings
+        removable_handles.append(_register_post_mask(model.embed_tokens, hidden_state_mask, extra_mask=extra_mask))
+
+        # decoder
+        for layer in range(model.config.num_hidden_layers):
+            # attentions
+            removable_handles.append(_register_post_mask(model.layers[layer].input_layernorm, hidden_state_mask, extra_mask=extra_mask))
+            # removable_handles.append(_register_pre_mask(model.layers[layer].self_attn, hidden_state_mask, extra_mask=extra_mask))
+            removable_handles.append(_register_post_mask(model.layers[layer].self_attn, hidden_state_mask, extra_mask=extra_mask))
+
+            # ffn
+            # removable_handles.append(_register_pre_mask(model.layers[layer].post_attention_layernorm, hidden_state_mask, extra_mask=extra_mask))
+            # removable_handles.append(_register_post_mask(model.layers[layer].post_attention_layernorm, hidden_state_mask, extra_mask=extra_mask))
+            removable_handles.append(_register_pre_mask(model.layers[layer].mlp, hidden_state_mask, extra_mask=extra_mask))
+            removable_handles.append(_register_post_mask(model.layers[layer].mlp, hidden_state_mask, extra_mask=extra_mask))
+
+        # norm
+        removable_handles.append(_register_pre_mask(model.norm, hidden_state_mask, extra_mask=extra_mask))
+    else:
+        raise ValueError(f"Unsupported architecture: {architecture}")
 
     return removable_handles

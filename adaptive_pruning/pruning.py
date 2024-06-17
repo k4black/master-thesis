@@ -347,7 +347,10 @@ def prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int]) -> N
 
 
 def select_to_prune_attention_heads(
-        importance_scores: torch.Tensor, percent_heads_to_prune: float, uniform_among_layers: bool = False
+        importance_scores: torch.Tensor,
+        percent_heads_to_prune: float,
+        uniform_among_layers: bool = False,
+        key_value_group_size: int = 1,
 ) -> dict[int, list[int]]:
     """
     Select least-k attention heads based on the importance scores.
@@ -359,9 +362,15 @@ def select_to_prune_attention_heads(
     :param importance_scores: The importance scores of the attention heads [num_hidden_layers, num_attention_heads]
     :param percent_heads_to_prune: The percentage of attention heads to keep
     :param uniform_among_layers: If True, prune the same number of heads from each layer
+    :param key_value_group_size: The number of attention heads to group together for key and value projections; 1 means no grouping
     :return: A dictionary with the layer indices as keys and a list of head indices to prune as values
     """
     assert 0 <= percent_heads_to_prune <= 1, "percent_heads_to_prune should be in [0, 1]"
+    assert 1 <= key_value_group_size <= importance_scores.size(1), "key_value_group_size should be in [1, num_attention_heads]"
+
+    # shrink the importance scores to the grouped size by averaging
+    if key_value_group_size != 1:
+        importance_scores = importance_scores.view(importance_scores.size(0), importance_scores.size(1) // key_value_group_size, key_value_group_size).mean(dim=-1)
 
     heads_to_prune = {}
     num_layers, num_heads = importance_scores.size()
@@ -397,6 +406,14 @@ def select_to_prune_attention_heads(
             heads_to_prune[layer].pop()
         if len(heads_to_prune[layer]) == 0:
             del heads_to_prune[layer]
+
+    # expand the grouped heads to the original size
+    if key_value_group_size != 1:
+        heads_to_prune_expanded = {}
+        for layer, heads in heads_to_prune.items():
+            heads_expanded = [i * key_value_group_size + j for i in heads for j in range(key_value_group_size)]
+            heads_to_prune_expanded[layer] = heads_expanded
+        heads_to_prune = heads_to_prune_expanded
 
     return heads_to_prune
 
@@ -483,7 +500,7 @@ def select_to_prune_ffn_layers(importance_scores: torch.Tensor, percent_layers_t
     return layers_to_prune
 
 
-def select_to_prune_hidden_state(importance_scores: torch.Tensor, percent_neurons_to_prune: float) -> list[int]:
+def select_to_prune_hidden_states(importance_scores: torch.Tensor, percent_neurons_to_prune: float) -> list[int]:
     """
     Select least-k neurons based on the importance scores.
 

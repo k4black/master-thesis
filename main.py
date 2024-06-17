@@ -42,7 +42,7 @@ from adaptive_pruning.importance import (
     collect_random_numbers,
     collect_activations,
     collect_weight_magnitudes,
-    collect_mask_grads,
+    collect_mask_gradients,
     info_to_mean,
     info_to_max,
     info_to_fisher,
@@ -270,7 +270,7 @@ def main(
 
     if components_info is None:
         if how_to_collect == "grads":
-            components_info = collect_mask_grads(model, sample_dataloader)
+            components_info = collect_mask_gradients(model, sample_dataloader)
         elif how_to_collect == "activations":
             components_info = collect_activations(model, sample_dataloader)
         elif how_to_collect == "weights":

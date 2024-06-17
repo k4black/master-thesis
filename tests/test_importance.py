@@ -8,7 +8,7 @@ from transformers import PreTrainedModel
 from adaptive_pruning.importance import (
     ComponentsInfo,
     ComponentsImportance,
-    collect_mask_grads,
+    collect_mask_gradients,
     collect_activations,
     collect_weight_magnitudes,
     collect_random_numbers,
@@ -31,7 +31,7 @@ class TestCollect:
     @pytest.mark.parametrize(
         "collector",
         [
-            collect_mask_grads,
+            collect_mask_gradients,
             collect_activations,
             collect_weight_magnitudes,
             collect_random_numbers,

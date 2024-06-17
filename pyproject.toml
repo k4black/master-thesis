@@ -20,7 +20,9 @@ exclude = [
 pythonpath = "."
 minversion = "6.0"
 addopts = "--cov=adaptive_pruning/ --cov-report=term-missing --cov-report=xml"
-
+testpaths = [
+    "tests",
+]
 
 [tool.ruff]
 line-length = 120
