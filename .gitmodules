@@ -1,3 +1,6 @@
 [submodule "llm_pruner"]
 	path = external/llm_pruner
 	url = git@github.com:horseee/LLM-Pruner.git
+[submodule "external/loraprune"]
+	path = external/loraprune
+	url = git@github.com:aim-uofa/LoRAPrune.git
