@@ -4,3 +4,6 @@
 [submodule "external/loraprune"]
 	path = external/loraprune
 	url = git@github.com:aim-uofa/LoRAPrune.git
+[submodule "external/llm_shearing"]
+	path = external/llm_shearing
+	url = git@github.com:princeton-nlp/LLM-Shearing.git
