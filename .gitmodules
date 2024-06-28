@@ -1,4 +1,4 @@
-[submodule "llm_pruner"]
+[submodule "external/llm_pruner"]
 	path = external/llm_pruner
 	url = git@github.com:horseee/LLM-Pruner.git
 	branch = main
@@ -29,4 +29,8 @@
 [submodule "external/laser"]
 	path = external/laser
 	url = git@github.com:pratyushasharma/laser.git
+	branch = main
+[submodule "external/bonsai"]
+	path = external/bonsai
+	url = git@github.com:ldery/Bonsai.git
 	branch = main
