@@ -1,12 +1,32 @@
 [submodule "llm_pruner"]
 	path = external/llm_pruner
 	url = git@github.com:horseee/LLM-Pruner.git
+	branch = main
 [submodule "external/loraprune"]
 	path = external/loraprune
 	url = git@github.com:aim-uofa/LoRAPrune.git
+	branch = main
 [submodule "external/llm_shearing"]
 	path = external/llm_shearing
 	url = git@github.com:princeton-nlp/LLM-Shearing.git
+	branch = main
 [submodule "external/wanda"]
 	path = external/wanda
 	url = git@github.com:locuslab/wanda.git
+	branch = main
+[submodule "external/slicegpt"]
+	path = external/slicegpt
+	url = git@github.com:microsoft/TransformerCompression.git
+	branch = main
+[submodule "external/sleb"]
+	path = external/sleb
+	url = git@github.com:jiwonsong-dev/SLEB.git
+	branch = main
+[submodule "external/compresso"]
+	path = external/compresso
+	url = git@github.com:microsoft/Moonlit.git
+	branch = main
+[submodule "external/laser"]
+	path = external/laser
+	url = git@github.com:pratyushasharma/laser.git
+	branch = main
