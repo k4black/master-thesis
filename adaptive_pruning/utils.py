@@ -1,35 +1,13 @@
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Any
+import sys
 
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from calflops import calculate_flops
-
-
-class TargetModules(NamedTuple):
-    attention_heads: str | list[str] | None
-    attention_layers: str | list[str] | None
-    ffn_neurons: str | list[str] | None
-    ffn_layers: str | list[str] | None
-    hidden_states: str | list[str] | None
-
-
-ARCHITECTURE_TO_TARGET_MODULES = {
-    "bert": TargetModules(
-        attention_heads="attention.self",
-        attention_layers="attention.output",
-        ffn_neurons="output",
-        ffn_layers="output.dense",
-        hidden_states=["embeddings"],
-    ),
-}
-
-
-def get_model_part_by_name(model: PreTrainedModel, name: str) -> nn.Module:
-    pass
-
+import tabulate
 
 
 def count_flops_macs_params(
@@ -58,28 +36,106 @@ def count_flops_macs_params(
     return flops, macs, params
 
 
-def count_parameters(
-        model: nn.Module,
-        require_grad: bool | None = None,
-        *,
-        print_results: bool = True,
+
+def count_zero_parameters(
+    module: torch.nn.Module,
+    require_grad: bool | None = None,
 ) -> int:
-    """
-    Count the number of parameters in the model.
-    :param model: torch.nn.Module or transformers.PreTrainedModel
-    :param require_grad: if defined (not None), count only parameters that require/not-require grad
-    :return: The number of parameters in the model
-    """
     if require_grad is None:
-        num_params = sum(p.numel() for p in model.parameters())
+        return sum(torch.sum(param == 0).item() for param in module.parameters())
     else:
-        num_params = sum(p.numel() for p in model.parameters() if p.requires_grad == require_grad)
+        return sum(torch.sum(param == 0).item() for param in module.parameters() if param.requires_grad == require_grad)
 
-    if print_results:
-        params_type = 'All' if require_grad is None else 'Trainable' if require_grad else 'Frozen'
-        print(f"Number of {params_type} parameters: {num_params}")
 
-    return num_params
+def count_nonzero_parameters(
+    module: torch.nn.Module,
+    require_grad: bool | None = None,
+) -> int:
+    if require_grad is None:
+        return sum(torch.sum(param != 0).item() for param in module.parameters())
+    else:
+        return sum(torch.sum(param != 0).item() for param in module.parameters() if param.requires_grad == require_grad)
+
+
+def count_total_parameters(
+    module: torch.nn.Module,
+    require_grad: bool | None = None,
+) -> int:
+    if require_grad is None:
+        return sum(p.numel() for p in module.parameters())
+    else:
+        return sum(p.numel() for p in module.parameters() if p.requires_grad == require_grad)
+    
+    
+def measure_original_model_stats(model: PreTrainedModel) -> dict[str, Any]:
+    base_model = model.base_model if hasattr(model, "base_model") else model
+    assert 'llama' in base_model.config.model_type.lower(), f"Only llama models are supported, got {base_model.config.model_type}"
+        
+    model_stats = {
+        'total': count_total_parameters(model),
+        'base': count_total_parameters(base_model),
+    }
+    for i, layer in enumerate(base_model.layers):
+        model_stats[f'layer_{i}'] = count_total_parameters(layer)
+    
+    return model_stats
+
+
+def measure_pruned_model_stats(model: PreTrainedModel, original_model_stats: dict[str, Any] | None = None) -> dict[str, Any]:
+    base_model = model.base_model if hasattr(model, "base_model") else model
+    assert 'llama' in base_model.config.model_type.lower(), f"Only llama models are supported, got {base_model.config.model_type}"
+         
+    # Check total sparsity
+    sparsity_stats = {
+        'total': {
+            'num_original_parameters': original_model_stats['total'] if original_model_stats else None,
+            'num_parameters': count_total_parameters(model),
+            'num_zero_parameters': count_zero_parameters(model),
+            'num_nonzero_parameters': count_nonzero_parameters(model),
+        },
+        'base': {
+            'num_original_parameters': original_model_stats['base'] if original_model_stats else None,
+            'num_parameters': count_total_parameters(base_model),
+            'num_zero_parameters': count_zero_parameters(base_model),
+            'num_nonzero_parameters': count_nonzero_parameters(base_model),
+        },
+    }
+    # Check sparsity by layer (unstructured and structured)
+    for i, layer in enumerate(base_model.layers):
+        sparsity_stats[f'layer_{i}'] = {
+            'num_original_parameters': original_model_stats[f'layer_{i}'] if original_model_stats else None,
+            'num_parameters': count_total_parameters(layer),
+            'num_zero_parameters': count_zero_parameters(layer),
+            'num_nonzero_parameters': count_nonzero_parameters(layer),
+        }
+    
+    # Add percentage columns
+    for key, stats in sparsity_stats.items():
+        stats['percentage_original_pruned'] = (stats['num_original_parameters'] - stats['num_parameters']) / stats['num_original_parameters'] * 100 if stats['num_original_parameters'] else None
+        stats['percentage_original_zero'] = stats['num_zero_parameters'] / stats['num_original_parameters'] * 100 if stats['num_original_parameters'] else None
+        stats['percentage_original_pruned_or_zero'] = (stats['num_original_parameters'] - stats['num_parameters'] + stats['num_zero_parameters']) / stats['num_original_parameters'] * 100 if stats['num_original_parameters'] else None
+        stats['percentage_zero'] = stats['num_zero_parameters'] / stats['num_parameters'] * 100
+
+    return sparsity_stats
+    
+
+def print_measure_table(stats: dict[str, Any]) -> None:
+    headers = ['Module', '#Params\n(Original)', '#Params\n(Pruned)', '#Params\n(Zero)', '#Params\n(Nonzero)', '%Pruned', '%Zero', '%Pruned or Zero', '%Zero\n(Current)']
+    table: list[list[Any]] = []
+    for key, values in stats.items():
+        table.append([
+            key,
+            format_number(values['num_original_parameters']) if values['num_original_parameters'] else '-',
+            format_number(values['num_parameters']),
+            format_number(values['num_zero_parameters']),
+            format_number(values['num_nonzero_parameters']),
+            f"{values['percentage_original_pruned']:.2f}%" if values['percentage_original_pruned'] else '-',
+            f"{values['percentage_original_zero']:.2f}%" if values['percentage_original_zero'] else '-',
+            f"{values['percentage_original_pruned_or_zero']:.2f}%" if values['percentage_original_pruned_or_zero'] else '-',
+            f"{values['percentage_zero']:.2f}%",
+        ])
+    print(tabulate.tabulate(table, headers=headers, tablefmt='pretty'))
+    sys.stdout.flush()
 
 
 def format_number(number: int) -> str:

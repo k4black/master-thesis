@@ -48,7 +48,7 @@ from adaptive_pruning.importance import (
     info_to_fisher,
     info_to_entropy, info_to_minus_entropy,
 )
-from adaptive_pruning.utils import count_parameters, format_number
+from adaptive_pruning.utils import count_total_parameters, format_number
 
 CUDA_DEVICES = (
     [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else []
@@ -220,7 +220,7 @@ def main(
     for param in model.parameters():
         param.requires_grad_(False)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-    print(f"Number of parameters: {format_number(count_parameters(model))}")
+    print(f"Number of parameters: {format_number(count_total_parameters(model))}")
     print("Model loaded")
 
     # load dataset
@@ -434,7 +434,7 @@ def main(
             validate_dataloader,
             task_name,
         )
-        model_params_num = count_parameters(model)
+        model_params_num = count_total_parameters(model)
         flops = FlopCountAnalysis(model, dict(next(iter(validate_dataloader))))
         stats_list.append(
             {

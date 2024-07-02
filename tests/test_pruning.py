@@ -11,7 +11,7 @@ from adaptive_pruning.pruning import (
 )
 from adaptive_pruning.utils import (
     nullify_attention_heads, nullify_attention_layers, nullify_ffn_neurons, nullify_ffn_layers, nullify_hidden_state,
-    count_flops_macs_params, count_parameters
+    count_flops_macs_params, count_total_parameters
 )
 
 
@@ -95,11 +95,11 @@ class TestPruneAttentionHeads:
     def test_less_params(
         self, test_lm_model: PreTrainedModel, heads_to_prune: dict[int, list[int]]
     ) -> None:
-        params_before = count_parameters(test_lm_model)
+        params_before = count_total_parameters(test_lm_model)
 
         prune_attention_heads(test_lm_model, heads_to_prune)
 
-        assert count_parameters(test_lm_model) < params_before
+        assert count_total_parameters(test_lm_model) < params_before
 
     def test_requires_grad_bert(self, bert_test_model: PreTrainedModel) -> None:
         # set params

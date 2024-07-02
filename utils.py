@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer, BatchEncoding, DataCollatorForLanguageModeling
 
-from adaptive_pruning.utils import format_number, count_parameters, count_flops_macs_params
+from adaptive_pruning.utils import format_number, count_flops_macs_params
 
 
 def set_random_seed(seed: int = 1234) -> None:
@@ -142,7 +142,7 @@ def measure_inference_time(
         if inference_dataset == "bookcorpus":
             inference_dataset = get_bookcorpus(tokenizer, dataset_size, 128)
         else:
-            inference_dataset = load_dataset(inference_dataset, split='train')
+            inference_dataset: Dataset = load_dataset(inference_dataset, split='train')
             inference_dataset = inference_dataset.select(range(dataset_size))
             def tokenize_function(examples):
                 return tokenizer(examples['text'], truncation=True, padding=False)
@@ -197,6 +197,8 @@ def evaluate_model(
     dtype: str = "auto",
     logging_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    # TODO: add GSM8k
+    # TODO: add crows_pairs (crows_pairs_english),realtoxicityprompts,toxigen,truthfulqa,model_written_evals
     # Reload model to gpu, update gpu cache
     model = model.to("cpu")
     gc.collect()

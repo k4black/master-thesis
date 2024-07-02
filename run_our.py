@@ -41,7 +41,7 @@ from adaptive_pruning.importance import (
     info_to_fisher,
     info_to_entropy, info_to_minus_entropy,
 )
-from adaptive_pruning.utils import count_parameters, format_number, count_flops_macs_params, tensor_to_list
+from adaptive_pruning.utils import count_total_parameters, format_number, count_flops_macs_params, tensor_to_list
 from utils import get_bookcorpus, set_random_seed, evaluate_model
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -145,7 +145,7 @@ def main(
         param.requires_grad_(False)
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-    print(f"Number of parameters: {format_number(count_parameters(model))}")
+    print(f"Number of parameters: {format_number(count_total_parameters(model))}")
     flops, macs, params = count_flops_macs_params(model, tokenizer)
     print(f"FLOPs: {format_number(flops)}, MACs: {format_number(macs)}, Params: {format_number(params)} ({params})")
     print("Model loaded")
