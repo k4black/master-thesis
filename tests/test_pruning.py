@@ -9,9 +9,9 @@ from adaptive_pruning.pruning import (
     select_to_prune_attention_heads, select_to_prune_attention_layers, select_to_prune_ffn_neurons,
     select_to_prune_ffn_layers
 )
-from adaptive_pruning.utils import (
+from adaptive_pruning.utils import count_flops_macs_params, count_total_parameters
+from adaptive_pruning.nullify import (
     nullify_attention_heads, nullify_attention_layers, nullify_ffn_neurons, nullify_ffn_layers, nullify_hidden_state,
-    count_flops_macs_params, count_total_parameters
 )
 
 

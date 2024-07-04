@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sized
 from typing import NamedTuple, cast
+import sys
 
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.hooks import RemovableHandle
 from tqdm import tqdm
 from transformers import PreTrainedModel
+import tabulate
 
 from adaptive_pruning.injections import (
     inject_attention_head_mask,
@@ -21,7 +23,7 @@ from adaptive_pruning.injections import (
 class ComponentsInfo(NamedTuple):
     attention_heads_info: torch.Tensor  # [num_samples, num_layers, num_heads]
     attention_layers_info: torch.Tensor  # [num_samples, num_layers]
-    ffn_neurons_info: torch.Tensor  # [num_samples, num_layers, hidden_state]
+    ffn_neurons_info: torch.Tensor  # [num_samples, num_layers, inner_size]
     ffn_layers_info: torch.Tensor  # [num_samples, num_layers]
     hidden_states_info: torch.Tensor  # [num_samples, hidden_state]
     meta_info: torch.Tensor  # [num_samples, 5] - attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state

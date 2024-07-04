@@ -1,10 +1,10 @@
 # linting and formatting
 black==24.4.2
 isort==5.13.2
-ruff==0.4.6
-mypy==1.10.0
+ruff==0.5.0
+mypy==1.10.1
 
 # testing
-pytest==8.2.1
+pytest==8.2.2
 pytest-cov==5.0.0
 pytest-mock==3.14.0

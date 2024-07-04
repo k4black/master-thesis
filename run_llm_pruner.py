@@ -1,20 +1,30 @@
-import os
 import copy
-from pathlib import Path
+import os
 import typing
+from pathlib import Path
+from typing import Optional
 
-import click
 import neptune
 import torch
+import typer
 from transformers import LlamaTokenizer
+
+from adaptive_pruning.utils import measure_original_model_stats, measure_pruned_model_stats
+
+
 # from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 if typing.TYPE_CHECKING:
     import external.llm_pruner.LLMPruner.torch_pruning as tp
+    from external.llm_pruner.LLMPruner.datasets.example_samples import get_examples
+    from external.llm_pruner.LLMPruner.models.hf_llama.modeling_llama import (
+        LlamaAttention,
+        LlamaForCausalLM,
+        LlamaMLP,
+        LlamaRMSNorm,
+    )
     from external.llm_pruner.LLMPruner.pruner import hf_llama_pruner as llama_pruner
     from external.llm_pruner.LLMPruner.utils.logger import LoggerWithDepth
-    from external.llm_pruner.LLMPruner.datasets.example_samples import get_examples
-    from external.llm_pruner.LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
 else:
     # add external.llm_pruner to access LLMPruner
     os.sys.path.append((Path(__file__).parent / "external" / "llm_pruner").as_posix())
@@ -23,111 +33,70 @@ else:
     from LLMPruner.utils.logger import LoggerWithDepth
     from LLMPruner.datasets.example_samples import get_examples
     from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
-from utils import set_random_seed, evaluate_model
+
+from utils import create_neptune_run, evaluate_model, save_model_tokenizer, set_random_seed
 
 
-@click.command()
-@click.option(
-    "--base_model",
-    type=str,
-    default="TinyLlama/TinyLlama-1.1B-intermediate-step-1195k-token-2.5T",
-    help="base model name",
-)
-@click.option(
-    "--save_ckpt_log_name",
-    type=str,
-    default="TinyLlama-1.1B-pruned",
-    help="the path for save the checkpoint and the log. The final path would be log/{your_name_here}_{pruner_type}_{pruning_ratio}",
-)
-@click.option("--pruning_ratio", type=float, default=0.5, help="pruning ratio")
-@click.option("--pruner_type", type=str, default="l2", help="pruner type")
-@click.option("--max_seq_len", type=int, default=128, help="max sequence length")
-@click.option("--channel_wise", is_flag=True, help="channel wise")
-@click.option("--block_wise", is_flag=True, help="block wise")
-@click.option("--layer_wise", is_flag=True, help="layer wise")
-@click.option("--layer", type=int, default=12, help="remain the previous n layers")
-@click.option("--block_attention_layer_start", type=int, help="start layer of block attention layers", default=3)
-@click.option("--block_attention_layer_end", type=int, help="end layer of block attention layers", default=31)
-@click.option("--block_mlp_layer_start", type=int, help="start layer of block mlp layers", default=3)
-@click.option("--block_mlp_layer_end", type=int, help="end layer of block mlp layers", default=31)
-@click.option("--iterative_steps", type=int, default=1, help="Iteration step for pruning. Default=1")
-@click.option("--grouping_strategy", type=str, default="sum", help="Reduce method for grouping")
-@click.option("--global_pruning", is_flag=True, help="whether global pruning")
-@click.option(
-    "--taylor", type=str, default="param_first", help="choose from [vectorize, param_second, param_first, param_mix]"
-)
-@click.option("--num_examples", type=int, default=10)
-@click.option("--device", type=str, default="cpu", help="device")
-@click.option("--eval_device", type=str, default="cpu", help="eval device")
-@click.option("--seed", type=int, default=42, help="seed")
-@click.option("--save_model", is_flag=True, help="if save model")
-@click.option("--evaluate", is_flag=True, help="if evaluate")
+IS_CUDA_AVAILABLE = torch.cuda.is_available()
+print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
+
+# fix backend for reproducibility
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+
 def main(
-    base_model: str,
-    save_ckpt_log_name: str,
-    pruning_ratio: float,
-    pruner_type: str,
-    max_seq_len: int,
-    channel_wise: bool,
-    block_wise: bool,
-    layer_wise: bool,
-    layer: int,
-    block_attention_layer_start: int,
-    block_attention_layer_end: int,
-    block_mlp_layer_start: int,
-    block_mlp_layer_end: int,
-    iterative_steps: int,
-    grouping_strategy: str,
-    global_pruning: bool,
-    taylor: str,
-    num_examples: int,
-    device: str,
-    eval_device: str,
-    seed: int,
-    save_model: bool,
-    evaluate: bool,
+    base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    pruning_ratio: float = 0.5,
+    pruner_type: str = "taylor",  # l1, l2, taylor
+    taylor: str = "param_first",  # vectorize, param_second, param_first, param_mix
+    max_seq_len: int = 128,
+    channel_wise: bool = False,  # do channel wise or block wise pruning
+    block_wise: bool = False,  # do block wise or layer wise pruning
+    layer_wise: bool = False,  # do block wise or layer wise pruning
+    keep_layers: int = 12,
+    block_attention_layer_start: int = 4,
+    block_attention_layer_end: int = 30,
+    block_mlp_layer_start: int = 4,
+    block_mlp_layer_end: int = 30,
+    iterative_steps: int = 1,
+    grouping_strategy: str = "sum",
+    global_pruning: bool = False,
+    num_examples: int = 10, # number of examples to use for calibration
+    seed: int = 42,
+    evaluate_on: Optional[str] = "perplexity+full+toxicity",
+    save_model_as: Optional[str] = None,
 ):
     set_random_seed(seed)
 
     # setup logging
-    neptune_run = neptune.init_run(tags=['llm-pruner', base_model, 'block_wise' if block_wise else 'channel_wise' if channel_wise else 'layer_wise'])
-    method = [
-        "attn-heads+ffn-neurons" if block_wise else None,
-        "hidden-state" if channel_wise else None,
-        "attn-layers+ffn-layers" if layer_wise else None,
-        pruner_type,
-    ]
-    method = "+".join([m for m in method if m ])
-    neptune_run["parameters"] = {
-        "base_model": base_model,
-        "lib": "llm-pruner",
-        "method": method,
-        "ratio": pruning_ratio,
-        "pruning_components": "attn-heads+ffn-neurons" if block_wise else "hidden-state" if channel_wise else "attn-layers+ffn-layers" if layer_wise else "attn-heads+ffn-neurons",
-        "how_to_collect": pruner_type,
-        "how_to_average": taylor,
-        "num_samples": num_examples,
-    }
-
-    logger = LoggerWithDepth(
-        env_name=f"{save_ckpt_log_name}",
-        config={},
-        root_dir="results/llm_pruner",
-        setup_sublogger=True,
+    neptune_run = create_neptune_run(
+        base_model=base_model,
+        lib="llm-pruner",
+        pruning_ratio=pruning_ratio,
+        pruning_components=["attn-heads", "ffn-neurons"] if block_wise else ["hidden-state"] if channel_wise else ["attn-layers", "ffn-layers"] if layer_wise else [],
+        calibration_dataset="bookcorpus",
+        calibration_batch_size=1,
+        calibration_num_samples=num_examples,
+        calibration_how_to_collect=pruner_type,
+        calibration_how_to_average=taylor,
+        calibration_how_to_overlap="none",
+        extra_tags=["baseline"],
     )
 
-    logger.log(f"Loading model {base_model}...")
+    print(f"Loading model {base_model}...")
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
     model = LlamaForCausalLM.from_pretrained(base_model, low_cpu_mem_usage=True)
-    if device != "cpu":
+    if IS_CUDA_AVAILABLE:
         model.half()
-    model.to(device)
+        model.to("cuda")
 
     pruner_type = pruner_type.lower()
     assert pruner_type in ["random", "l2", "l1", "taylor"]
 
     for param in model.parameters():
         param.requires_grad_(True)
+    original_model_stats = measure_original_model_stats(model, print_results=False)
     before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # Only for building the dependency graph.
@@ -137,14 +106,7 @@ def main(
             [1, 306, 4658, 278, 6593, 310, 2834, 338],
             [1, 3439, 17632, 1925, 29892, 278, 6368, 310],
         ]
-    ).to(device)
-    # print('-'*64)
-    # print(model)
-    # summary(model, input_data=forward_prompts, depth=4, device=device)
-    # for i, layer in enumerate(model.model.layers):
-    #     print(f"Layer {i}")
-    #     print(f"  Attention: {layer.self_attn.q_proj.weight.shape} (q_proj), {layer.self_attn.k_proj.weight.shape} (k_proj), {layer.self_attn.v_proj.weight.shape} (v_proj), {layer.self_attn.o_proj.weight.shape} (o_proj)")
-    #     print(f"  MLP: {layer.mlp.gate_proj.weight.shape} (gate_proj), {layer.mlp.up_proj.weight.shape} (up_proj), {layer.mlp.down_proj.weight.shape} (down_proj)")
+    ).to(model.device)
 
     if pruner_type == "random":
         imp = tp.importance.RandomImportance()
@@ -157,7 +119,7 @@ def main(
     else:
         raise NotImplementedError
 
-    logger.log(f"Use {pruner_type} pruner...")
+    print(f"Use {pruner_type} pruner...")
 
     if block_wise:
         kwargs = {
@@ -176,25 +138,25 @@ def main(
             ]
             + [model.model.layers[i].mlp.gate_proj for i in range(block_mlp_layer_start, block_mlp_layer_end)],
         }
-        logger.log(f"Pruning Attention Layer = {list(range(block_attention_layer_start, block_attention_layer_end))}")
-        logger.log(f"Pruning MLP Layer = {list(range(block_mlp_layer_start, block_mlp_layer_end))}")
+        print(f"Pruning Attention Layer = {list(range(block_attention_layer_start, block_attention_layer_end))}")
+        print(f"Pruning MLP Layer = {list(range(block_mlp_layer_start, block_mlp_layer_end))}")
 
         pruner = tp.pruner.MetaPruner(model, forward_prompts, **kwargs)
         model.zero_grad()
 
-        logger.log("Start Pruning")
+        print("Start Pruning")
         for i in range(iterative_steps):
-            logger.log(f"Iter {i + 1}/{iterative_steps}")
+            print(f"Iter {i + 1}/{iterative_steps}")
 
             if pruner_type in ["taylor"]:
-                example_prompts = get_examples("bookcorpus", tokenizer, num_examples, seq_len=64).to(device)
-                logger.log(f"Start Backwarding in iterative steps = {i}...")
+                example_prompts = get_examples("bookcorpus", tokenizer, num_examples, seq_len=64).to(model.device)
+                print(f"Start Backwarding in iterative steps = {i}...")
                 if taylor in ["param_mix", "param_second"]:
                     for j in range(num_examples):
-                        logger.log(f"Example {j + 1}/{num_examples}")
+                        print(f"Example {j + 1}/{num_examples}")
                         batch_input = example_prompts[j].unsqueeze(0)
                         loss = model(batch_input, labels=batch_input).loss
-                        logger.log(f"Loss = {loss}")
+                        print(f"Loss = {loss}")
                         loss.backward()
 
                         for module_param in model.parameters():
@@ -207,13 +169,13 @@ def main(
                         del loss.grad
 
                 loss = model(example_prompts, labels=example_prompts).loss
-                logger.log(f"Loss = {loss}")
+                print(f"Loss = {loss}")
                 loss.backward()
 
             pruner.step()
 
             after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.log(f"After Iter {i + 1}/{iterative_steps}, #parameters: {after_pruning_parameters}")
+            print(f"After Iter {i + 1}/{iterative_steps}, #parameters: {after_pruning_parameters}")
 
             # modify inferece-related attributes
             for layer in model.model.layers:
@@ -248,22 +210,22 @@ def main(
         pruner = tp.pruner.MetaPruner(model, forward_prompts, **kwargs)
         model.zero_grad()
 
-        logger.log("Start Pruning")
+        print("Start Pruning")
         assert iterative_steps >= 1
         for i in range(iterative_steps):
-            logger.log(f"Iter {i + 1}/{iterative_steps}")
+            print(f"Iter {i + 1}/{iterative_steps}")
 
             if pruner_type in ["taylor"]:
-                example_prompts = get_examples("bookcorpus", tokenizer, n_samples=num_examples, seq_len=max_seq_len).to(device)
-                logger.log(f"Start Backwarding in iterative steps = {i}...")
+                example_prompts = get_examples("bookcorpus", tokenizer, n_samples=num_examples, seq_len=max_seq_len).to(model.device)
+                print(f"Start Backwarding in iterative steps = {i}...")
                 loss = model(example_prompts, labels=example_prompts).loss
-                logger.log(f"Loss = {loss}")
+                print(f"Loss = {loss}")
                 loss.backward()
 
             pruner.step()
 
             after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.log(
+            print(
                 f"After Iter {i + 1}/{iterative_steps}, #parameters: {after_pruning_parameters}, Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
             )
 
@@ -280,26 +242,22 @@ def main(
         del pruner
 
     elif layer_wise:
-        model.model.layers = model.model.layers[:layer]
+        model.model.layers = model.model.layers[:keep_layers]
         after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     else:
         raise NotImplementedError
 
-    logger.log(
+    print(
         f"#Param before: {before_pruning_parameters}, #Param after: {after_pruning_parameters}, Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
     )
 
-    if save_model:
-        logger.log(f"Save the pruned model as {logger.best_checkpoint_path}")
-        model.half()
-        torch.save(
-            {
-                "model": model,
-                "tokenizer": tokenizer,
-            },
-            logger.best_checkpoint_path,
-        )
+    print("-" * 80)
+    pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
+    neptune_run["pruned_stats"] = pruned_model_stats
+
+    if save_model_as:
+        save_model_tokenizer(model, tokenizer, "results/"+save_model_as)
 
     print('-'*64)
     print(model)
@@ -314,17 +272,16 @@ def main(
     model.config.bos_token_id = 1
     model.config.eos_token_id = 2
 
-    if evaluate:
-        logger.log("\n==================Evaluation after Pruning==================\n")
+    if evaluate_on:
+        print("\n==================Evaluation after Pruning==================\n")
         eval_results = evaluate_model(
             model=model,
             tokenizer=tokenizer,
-            inference_dataset='bookcorpus',
-            name=save_ckpt_log_name,
-            device=eval_device,
+            task_groups=evaluate_on,
+            device='cuda' if IS_CUDA_AVAILABLE else 'cpu',
         )
         neptune_run["evaluation"] = eval_results
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

@@ -10,7 +10,7 @@ export $(cat .env | xargs)
 #base_model_name='TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T'
 #prune_ckpt_path='TinyLlama-1.1B-pruned'
 base_model_name='huggyllama/llama-7b'
-prune_ckpt_path='llama-7b-pruned'
+save_as='our-llama-7b-pruned'
 
 
 echo "[START] - Start Pruning Model (0)"
@@ -19,7 +19,7 @@ python run_our.py \
     --pruning_components ffn_neurons \
     --pruning_ratio 0.0 \
     --batch_size 10 \
-    --evaluate
+    --evaluate_on="perplexity+full+toxicity"
 echo "[END] - Finish Pruning Model (0)"
 
 #what_to_prune="ffn_neurons ffn_neurons_uniform attention_heads attention_heads_uniform"

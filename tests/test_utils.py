@@ -5,8 +5,8 @@ from torch import nn
 from torchinfo import summary
 
 from adaptive_pruning.utils import (
-format_number, count_total_parameters, count_zero_parameters, count_nonzero_parameters,
-measure_original_model_stats, measure_pruned_model_stats, print_measure_table
+    format_number, count_total_parameters, count_zero_parameters, count_nonzero_parameters,
+    measure_original_model_stats, measure_pruned_model_stats
 )
 
 
@@ -66,13 +66,16 @@ class TestFormatNumber:
             (123, "123"),
             (999, "999"),
             (1_000, "1.0K"),
+            (1_100, "1.1K"),
             (1_234, "1.2K"),
             (5_422, "5.4K"),
             # (999_999, "999.9K"),
             (1_000_000, "1.0M"),
+            (1_089_000, "1.1M"),
             (1_234_567, "1.2M"),
             # (999_999_999, "999.9M"),
             (1_000_000_000, "1.0B"),
+            (1_090_000_000, "1.1B"),
             (1_234_567_890, "1.2B"),
         ],
     )
@@ -153,24 +156,24 @@ class TestMeasureModels:
         assert sparsity_stats['layer_1']['percentage_original_pruned'] == 64*64/LLAMA_TEST_MODEL_LAYER_SIZE * 100
         assert sparsity_stats['layer_1']['percentage_zero'] == 64*64/(LLAMA_TEST_MODEL_LAYER_SIZE-64*64) * 100
 
-    def test_print_measure_table(self, llama_lm_test_model: PreTrainedModel, capsys: pytest.CaptureFixture) -> None:
-        # original_model_stats
-        original_model_stats = measure_original_model_stats(llama_lm_test_model)
-        # nullify some weights
-        llama_lm_test_model.base_model.layers[0].self_attn.q_proj.weight.data.fill_(0)
-        llama_lm_test_model.base_model.layers[1].self_attn.q_proj.weight.data.fill_(0)
-        llama_lm_test_model.base_model.layers[1].self_attn.o_proj.weight.data = torch.empty(0, 0)
-        # with original_model_stats provided
-        sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, original_model_stats)
-        print_measure_table(sparsity_stats)
-        captured = capsys.readouterr()
-        assert 'Module' in captured.out
-        assert '%Pruned' in captured.out
-        # ...
+    # def test_print_measure_table(self, llama_lm_test_model: PreTrainedModel, capsys: pytest.CaptureFixture) -> None:
+    #     # original_model_stats
+    #     original_model_stats = measure_original_model_stats(llama_lm_test_model)
+    #     # nullify some weights
+    #     llama_lm_test_model.base_model.layers[0].self_attn.q_proj.weight.data.fill_(0)
+    #     llama_lm_test_model.base_model.layers[1].self_attn.q_proj.weight.data.fill_(0)
+    #     llama_lm_test_model.base_model.layers[1].self_attn.o_proj.weight.data = torch.empty(0, 0)
+    #     # with original_model_stats provided
+    #     sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, original_model_stats)
+    #     print_measure_table(sparsity_stats)
+    #     captured = capsys.readouterr()
+    #     assert 'Module' in captured.out
+    #     assert '%Pruned' in captured.out
+    #     # ...
 
-        sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, None)
-        print_measure_table(sparsity_stats)
-        captured = capsys.readouterr()
-        assert 'Module' in captured.out
-        assert '%Pruned' in captured.out
-        # ...
+    #     sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, None)
+    #     print_measure_table(sparsity_stats)
+    #     captured = capsys.readouterr()
+    #     assert 'Module' in captured.out
+    #     assert '%Pruned' in captured.out
+    #     # ...

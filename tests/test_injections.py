@@ -6,7 +6,7 @@ from transformers import PreTrainedModel
 from adaptive_pruning.injections import (
     inject_attention_head_mask, inject_attention_layer_mask, inject_ffn_neuron_mask, inject_ffn_layer_mask
 )
-from adaptive_pruning.utils import (
+from adaptive_pruning.nullify import (
     nullify_attention_heads, nullify_attention_layers, nullify_ffn_neurons, nullify_ffn_layers, nullify_hidden_state
 )
 

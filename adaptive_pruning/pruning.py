@@ -77,7 +77,8 @@ def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list
                 # Update hyper params and store pruned heads
                 attention_layer.num_heads = attention_layer.num_heads - (len(heads_grouped) * num_heads_per_group)
                 attention_layer.num_key_value_heads = attention_layer.num_key_value_heads - len(heads_grouped)
-                attention_layer.hidden_size = attention_layer.hidden_size - (len(heads_grouped) * num_heads_per_group * head_dim)
+                # attention_layer.num_key_value_groups = attention_layer.num_key_value_groups  # keep the same group size
+                # attention_layer.hidden_size = attention_layer.hidden_size - (len(heads_grouped) * num_heads_per_group * head_dim)
 
 
 def prune_attention_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None:
@@ -151,6 +152,7 @@ def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[i
                 neurons_indexes_to_keep,
                 dim=1,
             )
+            layer.intermediate_size = len(neurons_indexes_to_keep)
         else:
             raise ValueError(f"Unsupported architecture: {architecture}")
 

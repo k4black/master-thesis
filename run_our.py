@@ -1,139 +1,108 @@
 from __future__ import annotations
 
+import gc
 import pickle
 import random
 from pathlib import Path
-import gc
+from typing import Literal, Optional
 
-import seaborn as sns
-import click
-import numpy as np
-import torch
-from neptune.types import File
-from transformers import (
-    AutoConfig,
-    AutoTokenizer,
-    AutoModelForCausalLM, DataCollatorForLanguageModeling,
-)
-from torch.utils.data import DataLoader
 import neptune
+import numpy as np
+import seaborn as sns
+import torch
+import typer
+from neptune.types import File
+from torch.utils.data import DataLoader
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
-from adaptive_pruning.pruning import (
-    prune_attention_heads,
-    prune_attention_layers,
-    prune_ffn_neurons,
-    prune_ffn_layers,
-    prune_hidden_state,
-    select_to_prune_attention_heads,
-    select_to_prune_attention_layers,
-    select_to_prune_ffn_neurons,
-    select_to_prune_ffn_layers, select_to_prune_hidden_states,
-)
 from adaptive_pruning.importance import (
     ComponentsImportance,
     ComponentsInfo,
-    collect_random_numbers,
     collect_activations,
-    collect_weight_magnitudes,
     collect_mask_gradients,
-    info_to_mean,
-    info_to_max,
+    collect_random_numbers,
+    collect_weight_magnitudes,
+    info_to_entropy,
     info_to_fisher,
-    info_to_entropy, info_to_minus_entropy,
+    info_to_max,
+    info_to_mean,
+    info_to_minus_entropy,
 )
-from adaptive_pruning.utils import count_total_parameters, format_number, count_flops_macs_params, tensor_to_list
-from utils import get_bookcorpus, set_random_seed, evaluate_model
+from adaptive_pruning.pruning import (
+    prune_attention_heads,
+    prune_attention_layers,
+    prune_ffn_layers,
+    prune_ffn_neurons,
+    prune_hidden_state,
+    select_to_prune_attention_heads,
+    select_to_prune_attention_layers,
+    select_to_prune_ffn_layers,
+    select_to_prune_ffn_neurons,
+    select_to_prune_hidden_states,
+)
+from adaptive_pruning.utils import (
+    count_flops_macs_params,
+    count_total_parameters,
+    format_number,
+    measure_original_model_stats,
+    measure_pruned_model_stats,
+    print_components_info_importance,
+    tensor_to_list,
+)
+from utils import create_neptune_run, evaluate_model, get_tokenized_dataset, save_model_tokenizer, set_random_seed
+
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
-IS_FP16_AVAILABLE = IS_CUDA_AVAILABLE and not torch.backends.cuda.matmul.allow_tf32
-IS_BF16_AVAILABLE = IS_CUDA_AVAILABLE and torch.backends.cuda.matmul.allow_tf32
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
-print(f"FP16_AVAILABLE: {IS_FP16_AVAILABLE}")
-print(f"BF16_AVAILABLE: {IS_BF16_AVAILABLE}")
 
 # fix backend for reproducibility
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-@click.command()
-@click.option("--base_model", type=str, default="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T")
-@click.option("--pruning_dataset", type=str, default="bookcorpus")
-@click.option("--batch_size", type=int, default=32)
-@click.option("--pruning_components", type=str, default="attention_heads")  # attention_heads, attention_layers, ffn_neurons, ffn_layers, hidden_state, all or splited by +
-@click.option("--how_to_collect", type=str, default="grads")  # grads or activations or random
-@click.option("--how_to_average", type=str, default="fisher_info")  # fisher_info or mean or entropy
-@click.option("--how_to_overlap", type=str, default="fixed")  # fixed, relative, meta
-@click.option("--pruning_ratio", type=float, default=0.5)
-@click.option("--num_samples", type=int, default=256)
-@click.option("--use_cache", is_flag=True, default=False)
-@click.option("--seed", type=int, default=0)
-@click.option("--evaluate", is_flag=True, default=False)
+
 def main(
-    base_model: str,
-    pruning_dataset: str,
-    batch_size: int,
-    how_to_collect: str,
-    how_to_average: str,
-    how_to_overlap: str,
-    pruning_components: str,
-    pruning_ratio: float,
-    num_samples: int,
-    use_cache: bool,
-    seed: int,
-    evaluate: bool,
+    base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    pruning_dataset: str = "bookcorpus",
+    batch_size: int = 32,
+    how_to_collect: str = "grads",  # grads or activations or random
+    how_to_average: str = "fisher_info",  # fisher_info, sum, mean, max or entropy
+    how_to_overlap: str = "fixed",  # fixed, relative, meta
+    pruning_components: str = "attn_heads",  # attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state, all or splited by +
+    pruning_ratio: float = 0.5,
+    num_samples: int = 256,
+    seed: int = 42,
+    evaluate_on: Optional[str] = "perplexity+full+toxicity",
+    save_model_as: Optional[str] = None,
 ) -> None:
     set_random_seed(seed)
 
     if pruning_components == "all":
-        pruning_components = "attention_heads+attention_layers+ffn_neurons+ffn_layers+hidden_state"
-    pruning_components = pruning_components.split("+")
-    do_prune_attention_heads = "attention_heads" in pruning_components
-    do_prune_attention_heads_uniform = "attention_heads_uniform" in pruning_components
-    do_prune_attention_layers = "attention_layers" in pruning_components
-    do_prune_ffn_neurons = "ffn_neurons" in pruning_components
-    do_prune_ffn_neurons_uniform = "ffn_neurons_uniform" in pruning_components
-    do_prune_ffn_layers = "ffn_layers" in pruning_components
-    do_prune_hidden_state = "hidden_state" in pruning_components
-
-    assert (
-        do_prune_attention_heads
-        or do_prune_attention_heads_uniform
-        or do_prune_attention_layers
-        or do_prune_ffn_neurons
-        or do_prune_ffn_neurons_uniform
-        or do_prune_ffn_layers
-        or do_prune_hidden_state
-    ), "Need to select at least one pruning method"
-    assert not (do_prune_attention_heads and do_prune_attention_heads_uniform), "Can't do both head and uniform head"
-    assert not (do_prune_ffn_neurons and do_prune_ffn_neurons_uniform), "Can't do both neuron and uniform neuron"
+        pruning_components = "attn_heads+attn_layers+ffn_neurons+ffn_layers+hidden_state"
+    pruning_components_list: list[str] = pruning_components.split("+")
+    assert len(pruning_components), "Need to select at least one pruning method"
+    
+    do_prune_attention_heads = "attn_heads" in pruning_components_list
+    do_prune_attention_heads_uniform = "attn_heads_uniform" in pruning_components_list
+    do_prune_attention_layers = "attn_layers" in pruning_components_list
+    do_prune_ffn_neurons = "ffn_neurons" in pruning_components_list
+    do_prune_ffn_neurons_uniform = "ffn_neurons_uniform" in pruning_components_list
+    do_prune_ffn_layers = "ffn_layers" in pruning_components_list
+    do_prune_hidden_state = "hidden_state" in pruning_components_list
 
     # setup logging
-    neptune_run = neptune.init_run(tags=['our', base_model, how_to_collect, how_to_average, how_to_overlap])
-    method = [
-        "attn-heads" if do_prune_attention_heads else None,
-        "attn-heads-uniform" if do_prune_attention_heads_uniform else None,
-        "attn-layers" if do_prune_attention_layers else None,
-        "ffn-neurons" if do_prune_ffn_neurons else None,
-        "ffn-neurons-uniform" if do_prune_ffn_neurons_uniform else None,
-        "ffn-layers" if do_prune_ffn_layers else None,
-        "hidden-state" if do_prune_hidden_state else None,
-        how_to_average,
-        how_to_overlap,
-    ]
-    method = "+".join([m for m in method if m ])
-    neptune_run["parameters"] = {
-        "base_model": base_model,
-        "lib": "our",
-        "method": method,
-        "ratio": pruning_ratio,
-        "pruning_dataset": pruning_dataset,
-        "batch_size": batch_size,
-        "pruning_components": pruning_components,
-        "how_to_collect": how_to_collect,
-        "how_to_average": how_to_average,
-        "how_to_overlap": how_to_overlap,
-        "num_samples": num_samples,
-    }
+    neptune_run = create_neptune_run(
+        base_model=base_model,
+        lib="our",
+        pruning_ratio=pruning_ratio,
+        pruning_components=pruning_components_list,
+        calibration_dataset=pruning_dataset,
+        calibration_batch_size=batch_size,
+        calibration_num_samples=num_samples,
+        calibration_how_to_collect=how_to_collect,
+        calibration_how_to_average=how_to_average,
+        calibration_how_to_overlap=how_to_overlap,
+        extra_tags=[],
+    )
 
     # Load the finetuned model and the corresponding tokenizer
     print(f"Loading model {base_model}...")
@@ -141,21 +110,16 @@ def main(
     model = AutoModelForCausalLM.from_pretrained(base_model, config=config)
     if IS_CUDA_AVAILABLE:
         model = model.to(device="cuda", non_blocking=True, dtype=torch.float16)
-    for param in model.parameters():
-        param.requires_grad_(False)
+    model.eval()
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-    print(f"Number of parameters: {format_number(count_total_parameters(model))}")
-    flops, macs, params = count_flops_macs_params(model, tokenizer)
-    print(f"FLOPs: {format_number(flops)}, MACs: {format_number(macs)}, Params: {format_number(params)} ({params})")
-    print("Model loaded")
+    print(f"Original Model: {base_model} loaded")
+    count_flops_macs_params(model, tokenizer, print_results=True)
+    original_model_stats = measure_original_model_stats(model, print_results=False)
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
-    if pruning_dataset == "bookcorpus":
-        dataset = get_bookcorpus(tokenizer, num_samples, 128)
-    else:
-        raise ValueError(f"Unknown pruning_dataset: {pruning_dataset}")
+    dataset = get_tokenized_dataset(pruning_dataset, 'train', tokenizer, num_samples, 128)
     collate_fn = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     print(dataset)
 
@@ -169,33 +133,23 @@ def main(
     print("Dataset loaded")
 
     # print model with sample input
-    # summary(model, input_size=(batch_size, 512), dtypes=['torch.IntTensor'], depth=7, device=model.device)
     print(model)
 
     print("-" * 80)
 
-    components_info = None
-    dataset_model_collect_hash = "info_" + "dataset" + str(dataset._fingerprint) + "_" + base_model.replace("/", "__") + "_" + how_to_collect
-    if use_cache and Path(f"results/{dataset_model_collect_hash}.pickle").exists():
-        print(f"Loading cached {how_to_collect} from {dataset_model_collect_hash}.pickle...")
-        components_info = pickle.load(open(f"results/{dataset_model_collect_hash}.pickle", "rb"))
-
-    if components_info is None:
-        if how_to_collect == "grads":
-            components_info = collect_mask_gradients(model, sample_dataloader)
-        elif how_to_collect == "full_grads":
-            components_info = collect_full_gradients(model, sample_dataloader)
-        elif how_to_collect == "activations":
-            components_info = collect_activations(model, sample_dataloader)
-        elif how_to_collect == "weights":
-            components_info = collect_weight_magnitudes(model)
-        elif how_to_collect == "random":
-            components_info = collect_random_numbers(model)
-        else:
-            assert False, f"Unknown how_to_collect: {how_to_collect}"
-
-        print(f"Saving {how_to_collect} to {dataset_model_collect_hash}.pickle...")
-        pickle.dump(components_info, open(f"results/{dataset_model_collect_hash}.pickle", "wb"))
+    # Collect components info
+    if how_to_collect == "grads":
+        components_info = collect_mask_gradients(model, sample_dataloader)
+    elif how_to_collect == "full_grads":
+        components_info = collect_full_gradients(model, sample_dataloader)
+    elif how_to_collect == "activations":
+        components_info = collect_activations(model, sample_dataloader)
+    elif how_to_collect == "weights":
+        components_info = collect_weight_magnitudes(model)
+    elif how_to_collect == "random":
+        components_info = collect_random_numbers(model)
+    else:
+        assert False, f"Unknown how_to_collect: {how_to_collect}"
 
     if how_to_average == "fisher_info":
         components_importance = info_to_fisher(components_info)
@@ -211,75 +165,40 @@ def main(
         assert False, f"Unknown how_to_average: {how_to_average}"
     relative_meta_importance = torch.nn.functional.softmax(components_importance.meta_importance.cpu().to(torch.float32), dim=0)
 
-    # Log importance
-    for name, info, importance in [
-        ("attention_heads", components_info.attention_heads_info, components_importance.attention_heads_importance),
-        ("attention_layers", components_info.attention_layers_info, components_importance.attention_layers_importance),
-        ("ffn_neurons", components_info.ffn_neurons_info, components_importance.ffn_neurons_importance),
-        ("ffn_layers", components_info.ffn_layers_info, components_importance.ffn_layers_importance),
-        ("hidden_states", components_info.hidden_states_info, components_importance.hidden_states_importance),
-        ("meta", components_info.meta_info, components_importance.meta_importance),
-    ]:
-        neptune_run[f"info/type"] = how_to_collect + "+" + how_to_average + "+" + how_to_overlap
-        neptune_run[f"info/{name}_importance_pickle"].upload(File.as_pickle(tensor_to_list(importance.cpu())))
-        neptune_run[f"info/{name}_info_pickle"].upload(File.as_pickle(tensor_to_list(info.cpu())))
-
-        numpy_image_importance = importance.cpu().numpy()
-        numpy_image_importance = numpy_image_importance if len(numpy_image_importance.shape) > 1 else numpy_image_importance[None, :]
-        neptune_run[f"info/{name}_importance_heatmap"].upload(File.as_image(sns.heatmap(numpy_image_importance, annot=False).get_figure()))
-
+    # Log info and importance
+    for name, value in components_info._asdict().items():
+        neptune_run[f"info/{name}"].upload(File.as_pickle(tensor_to_list(value)))
+    for name, value in components_importance._asdict().items():
+        neptune_run[f"info/{name}"].upload(File.as_pickle(tensor_to_list(value)))
+    
     # Print average importance
     print(f"Average importance for {how_to_collect}/{how_to_average}/{how_to_overlap}:")
-    for layer in range(config.num_hidden_layers):
-        print(f"> Layer {layer}:")
-        print(f"  Attention Head:            {components_importance.attention_heads_importance[layer].mean().item()}")
-        print(f"  Attention Layer sum Heads: {components_importance.attention_heads_importance[layer].sum().item()}")
-        print(f"  Attention Layer:           {components_importance.attention_layers_importance[layer].mean().item()}")
-        print(f"  FF Neuron:                 {components_importance.ffn_neurons_importance[layer].mean().item()}")
-        print(f"  FF Layer sum Neurons:      {components_importance.ffn_neurons_importance[layer].sum().item()}")
-        print(f"  FF Layer:                  {components_importance.ffn_layers_importance[layer].mean().item()}")
-    print(f"> Hidden State: {components_importance.hidden_states_importance.mean().item()}")
-    print(f"> Meta:")
-    for meta_name, meta_value in [
-        ("attn-head", components_importance.meta_importance[0]),
-        ("attn-layer", components_importance.meta_importance[1]),
-        ("ffn-neuron", components_importance.meta_importance[2]),
-        ("ffn-layer", components_importance.meta_importance[3]),
-        ("hidden-state", components_importance.meta_importance[4]),
-    ]:
-        print(f"  {meta_name}:\t {meta_value}")
+    print_components_info_importance(components_importance)
 
     # Select pruning percent for each component type
     print(f"Select pruning percent for each component type, with {how_to_overlap} overlap")
     print(f"Base pruning ratio: {pruning_ratio}")
     if how_to_overlap == "fixed":
         # Prune same rate of specified components (e.g. 20% of attention heads, 20% of ffn neurons)
-        attention_heads_pruning_ratio = pruning_ratio if do_prune_attention_heads else 0
+        attention_heads_pruning_ratio = pruning_ratio if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
         attention_layers_pruning_ratio = pruning_ratio if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio if do_prune_ffn_neurons else 0
+        ffn_neurons_pruning_ratio = pruning_ratio if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio if do_prune_hidden_state else 0
     elif how_to_overlap == "fixed_x2_x05":
         # Multiply attention heads deletion, decrease ffn neurons deletion
-        attention_heads_pruning_ratio = min(pruning_ratio * 2, 0.9) if do_prune_attention_heads else 0
+        attention_heads_pruning_ratio = min(pruning_ratio * 2, 0.9) if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
         attention_layers_pruning_ratio = pruning_ratio if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = min(pruning_ratio * 0.5, 0.9) if do_prune_ffn_neurons else 0
+        ffn_neurons_pruning_ratio = min(pruning_ratio * 0.5, 0.9) if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio if do_prune_hidden_state else 0
     elif how_to_overlap == "fixed_x05_x2":
         # Multiply ffn neurons deletion, decrease attention heads deletion
-        attention_heads_pruning_ratio = min(pruning_ratio * 0.5, 0.9) if do_prune_attention_heads else 0
+        attention_heads_pruning_ratio = min(pruning_ratio * 0.5, 0.9) if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
         attention_layers_pruning_ratio = pruning_ratio if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = min(pruning_ratio * 2, 0.9) if do_prune_ffn_neurons else 0
+        ffn_neurons_pruning_ratio = min(pruning_ratio * 2, 0.9) if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio if do_prune_hidden_state else 0
-    elif how_to_overlap == "random":
-        # multiple random pruning ratios on random [0, 2] * pruning_ratio
-        attention_heads_pruning_ratio = min(pruning_ratio * random.random() * 2, 0.9) if do_prune_attention_heads else 0
-        attention_layers_pruning_ratio = min(pruning_ratio * random.random() * 2, 0.9) if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = min(pruning_ratio * random.random() * 2, 0.9) if do_prune_ffn_neurons else 0
-        ffn_layers_pruning_ratio = min(pruning_ratio * random.random() * 2, 0.9) if do_prune_ffn_layers else 0
-        hidden_states_pruning_ratio = min(pruning_ratio * random.random() * 2, 0.9) if do_prune_hidden_state else 0
     elif how_to_overlap == "relative":
         # Use actual relative importance to calculate pruning ratio
         relative_importance = torch.tensor([
@@ -292,9 +211,9 @@ def main(
         relative_pruning_coefficient = torch.softmax(-1 * relative_importance, dim=0) * relative_importance.shape[0]
         print('Relative importance', relative_importance)
         print('Relative pruning coefficient', relative_pruning_coefficient)
-        attention_heads_pruning_ratio = pruning_ratio * relative_pruning_coefficient[0].item() if do_prune_attention_heads else 0
+        attention_heads_pruning_ratio = pruning_ratio * relative_pruning_coefficient[0].item() if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
         attention_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio * relative_pruning_coefficient[2].item() if do_prune_ffn_neurons else 0
+        ffn_neurons_pruning_ratio = pruning_ratio * relative_pruning_coefficient[2].item() if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_state else 0
     elif how_to_overlap == "relative_per_param":
@@ -324,9 +243,9 @@ def main(
         print('Relative importance', relative_importance)
         print('Relative pruning coefficient', relative_pruning_coefficient)
 
-        attention_heads_pruning_ratio = pruning_ratio * relative_pruning_coefficient[0].item() if do_prune_attention_heads else 0
+        attention_heads_pruning_ratio = pruning_ratio * relative_pruning_coefficient[0].item() if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
         attention_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio * relative_pruning_coefficient[2].item() if do_prune_ffn_neurons else 0
+        ffn_neurons_pruning_ratio = pruning_ratio * relative_pruning_coefficient[2].item() if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_state else 0
     elif how_to_overlap == "meta":
@@ -335,9 +254,9 @@ def main(
         relative_meta_pruning_coefficient = torch.softmax(-1 * relative_meta_importance, dim=0) * relative_meta_importance.shape[0]
         print('Relative meta importance', relative_meta_importance)
         print('Relative meta pruning coefficient', relative_meta_pruning_coefficient)
-        attention_heads_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[0].item() if do_prune_attention_heads else 0
+        attention_heads_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[0].item() if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
         attention_layers_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[1].item() if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[2].item() if do_prune_ffn_neurons else 0
+        ffn_neurons_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[2].item() if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[4].item() if do_prune_hidden_state else 0
     else:
@@ -448,28 +367,27 @@ def main(
             f"Total: {total_percent_neurons_deleted * 100:.2f}% neurons deleted, "
             f"{(1 - total_percent_neurons_deleted) * 100:.2f}% remain"
         )
+    
+    print("-" * 80)
+    pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
+    neptune_run["pruned_stats"] = pruned_model_stats
 
-    gc.collect()
+    if save_model_as:
+        save_model_tokenizer(model, tokenizer, "results/"+save_model_as)
 
     # Log pruned model
-    if evaluate:
+    if evaluate_on:
         print("\n==================Evaluation after Pruning==================\n")
         eval_results = evaluate_model(
             model=model,
             tokenizer=tokenizer,
-            inference_dataset='bookcorpus',
-            name=f"{base_model}-pruning-{pruning_ratio}-{how_to_collect}-{how_to_average}",
+            task_groups=evaluate_on,
             device='cuda' if IS_CUDA_AVAILABLE else 'cpu',
         )
         neptune_run["evaluation"] = eval_results
-
 
     neptune_run.stop()
 
 
 if __name__ == "__main__":
-    if IS_FP16_AVAILABLE:
-        with torch.cuda.amp.autocast():
-            main()
-    else:
-        main()
+    typer.run(main)
