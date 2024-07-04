@@ -17,7 +17,7 @@ chmod a+x jobs/*.sh
 srun \
   --container-mounts=/dev/fuse:/dev/fuse,/netscratch/$USER:/netscratch/$USER,"`pwd`":"`pwd`" \
   --container-workdir="`pwd`" \
-  --container-image=/enroot/nvcr.io_nvidia_pytorch_23.08-py3.sqsh \
+  --container-image=/enroot/nvcr.io_nvidia_pytorch_24.06-py3.sqsh\
   --job-name=master-thesis \
   --gpus=1 \
   --mem=64G \

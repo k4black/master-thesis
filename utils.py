@@ -77,12 +77,12 @@ def create_neptune_run(
         "calibration_how_to_collect": calibration_how_to_collect,
         "calibration_how_to_average": calibration_how_to_average,
         "calibration_how_to_overlap": calibration_how_to_overlap,
-        "finetuning": finetuning,
-        "finetuning_dataset": finetuning_dataset,
-        "finetuning_batch_size": finetuning_batch_size,
-        "finetuning_num_samples": finetuning_num_samples,
-        "finetuning_learning_rate": finetuning_learning_rate,
-        "finetuning_epochs": finetuning_epochs,
+        # "finetuning": finetuning,
+        # "finetuning_dataset": finetuning_dataset,
+        # "finetuning_batch_size": finetuning_batch_size,
+        # "finetuning_num_samples": finetuning_num_samples,
+        # "finetuning_learning_rate": finetuning_learning_rate,
+        # "finetuning_epochs": finetuning_epochs,
     }
     
     return neptune_run

@@ -9,8 +9,8 @@ if [[ $SLURM_LOCALID == 0 ]]; then
   apt update; apt install -y python3-venv ; apt clean
   python -m venv .venv || true
   . .venv/bin/activate
-  python -m pip install -r requirements.txt
-  python -m pip install -e ./external/llm_pruner
+  python -m pip install -U -r requirements.txt
+#  python -m pip install -e ./external/llm_pruner
 
   # Tell other tasks we are done installing
   touch "${DONEFILE}"
