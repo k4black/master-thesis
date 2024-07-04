@@ -50,6 +50,7 @@ def create_neptune_run(
     calibration_how_to_collect: str,  # gradients, activations, etc.
     calibration_how_to_average: str,  # mean, fisher_info, entropy, etc.
     calibration_how_to_overlap: str,  # fixed, relative, etc.
+    save_model_as: str | None = None,
     finetuning: bool = False,
     finetuning_dataset: str | None = None,
     finetuning_batch_size: int | None = None,
@@ -77,6 +78,7 @@ def create_neptune_run(
         "calibration_how_to_collect": calibration_how_to_collect,
         "calibration_how_to_average": calibration_how_to_average,
         "calibration_how_to_overlap": calibration_how_to_overlap,
+        "save_model_as": save_model_as,
         # "finetuning": finetuning,
         # "finetuning_dataset": finetuning_dataset,
         # "finetuning_batch_size": finetuning_batch_size,

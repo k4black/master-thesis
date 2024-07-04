@@ -50,6 +50,7 @@ def main(
         calibration_how_to_collect='',
         calibration_how_to_average='',
         calibration_how_to_overlap='',
+        save_model_as=None,
         extra_tags=[],
     )
 

@@ -81,6 +81,7 @@ def main(
         calibration_how_to_collect=pruner_type,
         calibration_how_to_average=taylor,
         calibration_how_to_overlap="none",
+        save_model_as=save_model_as,
         extra_tags=["baseline"],
     )
 

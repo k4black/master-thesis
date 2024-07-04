@@ -101,6 +101,7 @@ def main(
         calibration_how_to_collect=how_to_collect,
         calibration_how_to_average=how_to_average,
         calibration_how_to_overlap=how_to_overlap,
+        save_model_as=save_model_as,
         extra_tags=[],
     )
 
@@ -119,17 +120,17 @@ def main(
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
-    dataset = get_tokenized_dataset(pruning_dataset, 'train', tokenizer, num_samples, 128)
+    calibration_dataset = get_tokenized_dataset(pruning_dataset, 'train', tokenizer, num_samples, 128)
     collate_fn = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    print(dataset)
+    print(calibration_dataset)
 
-    sample_dataloader = DataLoader(
-        dataset,
+    calibration_dataloader = DataLoader(
+        calibration_dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
     )
-    print(f"Sample dataloader: {len(dataset)} samples")
+    print(f"Calibration dataloader: {len(calibration_dataset)} samples")
     print("Dataset loaded")
 
     # print model with sample input
@@ -139,11 +140,11 @@ def main(
 
     # Collect components info
     if how_to_collect == "grads":
-        components_info = collect_mask_gradients(model, sample_dataloader)
+        components_info = collect_mask_gradients(model, calibration_dataloader)
     elif how_to_collect == "full_grads":
-        components_info = collect_full_gradients(model, sample_dataloader)
+        components_info = collect_full_gradients(model, calibration_dataloader)
     elif how_to_collect == "activations":
-        components_info = collect_activations(model, sample_dataloader)
+        components_info = collect_activations(model, calibration_dataloader)
     elif how_to_collect == "weights":
         components_info = collect_weight_magnitudes(model)
     elif how_to_collect == "random":

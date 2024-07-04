@@ -11,6 +11,7 @@ warn_unused_ignores = true
 warn_unreachable = true
 allow_untyped_decorators = true
 exclude = [
+    "external/",
     "tests/",
     ".tmp/",
     ".venv/"
@@ -27,6 +28,8 @@ testpaths = [
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+
+extend-exclude = ["external/"]
 
 # Enable the pycodestyle (`E`) and Pyflakes (`F`) rules by default.
 # Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
@@ -69,6 +72,7 @@ exclude = [
 
 [tool.isort]
 profile = "black"
+extend_skip = ["external/"]
 line_length = 120
 lines_after_imports = 2
 combine_as_imports = true
@@ -78,3 +82,4 @@ known_first_party = "adaptive_pruning,tests"
 [tool.black]
 line-length = 120
 target-version = ['py312']
+extend-exclude = "external/"
