@@ -5,7 +5,7 @@ from datasets import DatasetDict, load_dataset
 from evaluate import load
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import PreTrainedTokenizer, PreTrainedModel, BatchEncoding
+from transformers import BatchEncoding, PreTrainedModel, PreTrainedTokenizer
 
 
 def load_glue_dataset(task_name: str, tokenizer: PreTrainedTokenizer) -> DatasetDict:
@@ -77,7 +77,9 @@ def measure_glue_metric(
     # evaluate
     model.eval()
     start_time = time.perf_counter()
-    batch_iterator = tqdm(dataloader, total=len(dataloader), desc=f"Evaluating {task_name}", leave=False) if verbose else dataloader
+    batch_iterator = (
+        tqdm(dataloader, total=len(dataloader), desc=f"Evaluating {task_name}", leave=False) if verbose else dataloader
+    )
     for batch in batch_iterator:
         for k, v in batch.items():
             batch[k] = v.to(model.device, non_blocking=True)

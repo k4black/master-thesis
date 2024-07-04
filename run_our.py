@@ -1,14 +1,7 @@
 from __future__ import annotations
 
-import gc
-import pickle
-import random
-from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
-import neptune
-import numpy as np
-import seaborn as sns
 import torch
 import typer
 from neptune.types import File
@@ -16,8 +9,6 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
 from adaptive_pruning.importance import (
-    ComponentsImportance,
-    ComponentsInfo,
     collect_activations,
     collect_mask_gradients,
     collect_random_numbers,
@@ -33,7 +24,6 @@ from adaptive_pruning.pruning import (
     prune_attention_layers,
     prune_ffn_layers,
     prune_ffn_neurons,
-    prune_hidden_state,
     select_to_prune_attention_heads,
     select_to_prune_attention_layers,
     select_to_prune_ffn_layers,
@@ -42,8 +32,6 @@ from adaptive_pruning.pruning import (
 )
 from adaptive_pruning.utils import (
     count_flops_macs_params,
-    count_total_parameters,
-    format_number,
     measure_original_model_stats,
     measure_pruned_model_stats,
     print_components_info_importance,
@@ -67,7 +55,7 @@ def main(
     how_to_collect: str = "grads",  # grads or activations or random
     how_to_average: str = "fisher_info",  # fisher_info, sum, mean, max or entropy
     how_to_overlap: str = "fixed",  # fixed, relative, meta
-    pruning_components: str = "attn_heads",  # attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state, all or splited by +
+    pruning_components: str = "attn_heads",  # attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state, all
     pruning_ratio: float = 0.5,
     num_samples: int = 256,
     seed: int = 42,
@@ -80,7 +68,7 @@ def main(
         pruning_components = "attn_heads+attn_layers+ffn_neurons+ffn_layers+hidden_state"
     pruning_components_list: list[str] = pruning_components.split("+")
     assert len(pruning_components), "Need to select at least one pruning method"
-    
+
     do_prune_attention_heads = "attn_heads" in pruning_components_list
     do_prune_attention_heads_uniform = "attn_heads_uniform" in pruning_components_list
     do_prune_attention_layers = "attn_layers" in pruning_components_list
@@ -120,7 +108,7 @@ def main(
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
-    calibration_dataset = get_tokenized_dataset(pruning_dataset, 'train', tokenizer, num_samples, 128)
+    calibration_dataset = get_tokenized_dataset(pruning_dataset, "train", tokenizer, num_samples, 128)
     collate_fn = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     print(calibration_dataset)
 
@@ -164,14 +152,16 @@ def main(
         components_importance = info_to_minus_entropy(components_info)
     else:
         assert False, f"Unknown how_to_average: {how_to_average}"
-    relative_meta_importance = torch.nn.functional.softmax(components_importance.meta_importance.cpu().to(torch.float32), dim=0)
+    relative_meta_importance = torch.nn.functional.softmax(
+        components_importance.meta_importance.cpu().to(torch.float32), dim=0
+    )
 
     # Log info and importance
     for name, value in components_info._asdict().items():
         neptune_run[f"info/{name}"].upload(File.as_pickle(tensor_to_list(value)))
     for name, value in components_importance._asdict().items():
         neptune_run[f"info/{name}"].upload(File.as_pickle(tensor_to_list(value)))
-    
+
     # Print average importance
     print(f"Average importance for {how_to_collect}/{how_to_average}/{how_to_overlap}:")
     print_components_info_importance(components_importance)
@@ -181,42 +171,66 @@ def main(
     print(f"Base pruning ratio: {pruning_ratio}")
     if how_to_overlap == "fixed":
         # Prune same rate of specified components (e.g. 20% of attention heads, 20% of ffn neurons)
-        attention_heads_pruning_ratio = pruning_ratio if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
+        attention_heads_pruning_ratio = (
+            pruning_ratio if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
+        )
         attention_layers_pruning_ratio = pruning_ratio if do_prune_attention_layers else 0
         ffn_neurons_pruning_ratio = pruning_ratio if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
         ffn_layers_pruning_ratio = pruning_ratio if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio if do_prune_hidden_state else 0
     elif how_to_overlap == "fixed_x2_x05":
         # Multiply attention heads deletion, decrease ffn neurons deletion
-        attention_heads_pruning_ratio = min(pruning_ratio * 2, 0.9) if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
+        attention_heads_pruning_ratio = (
+            min(pruning_ratio * 2, 0.9) if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
+        )
         attention_layers_pruning_ratio = pruning_ratio if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = min(pruning_ratio * 0.5, 0.9) if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
+        ffn_neurons_pruning_ratio = (
+            min(pruning_ratio * 0.5, 0.9) if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
+        )
         ffn_layers_pruning_ratio = pruning_ratio if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio if do_prune_hidden_state else 0
     elif how_to_overlap == "fixed_x05_x2":
         # Multiply ffn neurons deletion, decrease attention heads deletion
-        attention_heads_pruning_ratio = min(pruning_ratio * 0.5, 0.9) if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
+        attention_heads_pruning_ratio = (
+            min(pruning_ratio * 0.5, 0.9) if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
+        )
         attention_layers_pruning_ratio = pruning_ratio if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = min(pruning_ratio * 2, 0.9) if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
+        ffn_neurons_pruning_ratio = (
+            min(pruning_ratio * 2, 0.9) if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
+        )
         ffn_layers_pruning_ratio = pruning_ratio if do_prune_ffn_layers else 0
         hidden_states_pruning_ratio = pruning_ratio if do_prune_hidden_state else 0
     elif how_to_overlap == "relative":
         # Use actual relative importance to calculate pruning ratio
-        relative_importance = torch.tensor([
-            components_importance.attention_heads_importance.cpu().mean().item(),
-            components_importance.attention_layers_importance.cpu().mean().item(),
-            components_importance.ffn_neurons_importance.cpu().mean().item(),
-            components_importance.ffn_layers_importance.cpu().mean().item(),
-            components_importance.hidden_states_importance.cpu().mean().item(),
-        ])
+        relative_importance = torch.tensor(
+            [
+                components_importance.attention_heads_importance.cpu().mean().item(),
+                components_importance.attention_layers_importance.cpu().mean().item(),
+                components_importance.ffn_neurons_importance.cpu().mean().item(),
+                components_importance.ffn_layers_importance.cpu().mean().item(),
+                components_importance.hidden_states_importance.cpu().mean().item(),
+            ]
+        )
         relative_pruning_coefficient = torch.softmax(-1 * relative_importance, dim=0) * relative_importance.shape[0]
-        print('Relative importance', relative_importance)
-        print('Relative pruning coefficient', relative_pruning_coefficient)
-        attention_heads_pruning_ratio = pruning_ratio * relative_pruning_coefficient[0].item() if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
-        attention_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio * relative_pruning_coefficient[2].item() if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
+        print("Relative importance", relative_importance)
+        print("Relative pruning coefficient", relative_pruning_coefficient)
+        attention_heads_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[0].item()
+            if do_prune_attention_heads or do_prune_attention_heads_uniform
+            else 0
+        )
+        attention_layers_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
+        )
+        ffn_neurons_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[2].item()
+            if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform
+            else 0
+        )
         ffn_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
-        hidden_states_pruning_ratio = pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_state else 0
+        hidden_states_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_state else 0
+        )
     elif how_to_overlap == "relative_per_param":
         # Use actual relative importance to calculate pruning ratio
         # Use number of possible pruning parameters to calculate pruning ratio
@@ -224,54 +238,95 @@ def main(
         _num_q_per_kv = config.num_attention_heads // config.num_key_value_heads
         _single_head_size = config.hidden_size // config.num_attention_heads
         # k + v of the same size and q and output of the same size
-        num_parameters_attention_head_group = 2 * _single_head_size * config.hidden_size + 2 * _single_head_size * _num_q_per_kv * config.hidden_size
-        num_parameters_attention_layer = num_parameters_attention_head_group * config.num_key_value_heads # + bias
+        num_parameters_attention_head_group = (
+            2 * _single_head_size * config.hidden_size + 2 * _single_head_size * _num_q_per_kv * config.hidden_size
+        )
+        num_parameters_attention_layer = num_parameters_attention_head_group * config.num_key_value_heads  # + bias
         # gate, input, output
         num_parameters_ffn_neuron = 3 * config.hidden_size
-        num_parameters_ffn_layer = num_parameters_ffn_neuron * config.intermediate_size # + bias
+        num_parameters_ffn_layer = num_parameters_ffn_neuron * config.intermediate_size  # + bias
         # hidden state = emb + 2 norms, attention, ffn
-        num_parameters_hidden_state = config.vocab_size + config.num_hidden_layers * (2 + 2*_single_head_size*config.num_key_value_heads + 2*_single_head_size*config.num_attention_heads + 3*config.intermediate_size)
-        total_parameters = num_parameters_hidden_state * config.hidden_size + config.num_hidden_layers * (num_parameters_attention_layer + num_parameters_ffn_layer)
+        num_parameters_hidden_state = config.vocab_size + config.num_hidden_layers * (
+            2
+            + 2 * _single_head_size * config.num_key_value_heads
+            + 2 * _single_head_size * config.num_attention_heads
+            + 3 * config.intermediate_size
+        )
+        total_parameters = num_parameters_hidden_state * config.hidden_size + config.num_hidden_layers * (  # noqa: F841
+            num_parameters_attention_layer + num_parameters_ffn_layer
+        )
 
-        relative_importance = torch.tensor([
-            components_importance.attention_heads_importance.cpu().mean().item() / num_parameters_attention_head_group,
-            components_importance.attention_layers_importance.cpu().mean().item() / num_parameters_attention_layer,
-            components_importance.ffn_neurons_importance.cpu().mean().item() / num_parameters_ffn_neuron,
-            components_importance.ffn_layers_importance.cpu().mean().item() / num_parameters_ffn_layer,
-            components_importance.hidden_states_importance.cpu().mean().item() / num_parameters_hidden_state,
-        ])
+        relative_importance = torch.tensor(
+            [
+                components_importance.attention_heads_importance.cpu().mean().item()
+                / num_parameters_attention_head_group,
+                components_importance.attention_layers_importance.cpu().mean().item() / num_parameters_attention_layer,
+                components_importance.ffn_neurons_importance.cpu().mean().item() / num_parameters_ffn_neuron,
+                components_importance.ffn_layers_importance.cpu().mean().item() / num_parameters_ffn_layer,
+                components_importance.hidden_states_importance.cpu().mean().item() / num_parameters_hidden_state,
+            ]
+        )
         relative_pruning_coefficient = torch.softmax(-1 * relative_importance, dim=0) * relative_importance.shape[0]
-        print('Relative importance', relative_importance)
-        print('Relative pruning coefficient', relative_pruning_coefficient)
+        print("Relative importance", relative_importance)
+        print("Relative pruning coefficient", relative_pruning_coefficient)
 
-        attention_heads_pruning_ratio = pruning_ratio * relative_pruning_coefficient[0].item() if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
-        attention_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio * relative_pruning_coefficient[2].item() if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
+        attention_heads_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[0].item()
+            if do_prune_attention_heads or do_prune_attention_heads_uniform
+            else 0
+        )
+        attention_layers_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
+        )
+        ffn_neurons_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[2].item()
+            if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform
+            else 0
+        )
         ffn_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
-        hidden_states_pruning_ratio = pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_state else 0
+        hidden_states_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_state else 0
+        )
     elif how_to_overlap == "meta":
         # change the pruning ratio based on the relative importance of the components
-        # e.g. given pruning ration of 20% and attention importance 2 times lower than ffn importance - prune 30% of attention and 10% of ffn
-        relative_meta_pruning_coefficient = torch.softmax(-1 * relative_meta_importance, dim=0) * relative_meta_importance.shape[0]
-        print('Relative meta importance', relative_meta_importance)
-        print('Relative meta pruning coefficient', relative_meta_pruning_coefficient)
-        attention_heads_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[0].item() if do_prune_attention_heads or do_prune_attention_heads_uniform else 0
-        attention_layers_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[1].item() if do_prune_attention_layers else 0
-        ffn_neurons_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[2].item() if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform else 0
-        ffn_layers_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
-        hidden_states_pruning_ratio = pruning_ratio * relative_meta_pruning_coefficient[4].item() if do_prune_hidden_state else 0
+        # e.g. given pruning ration of 20% and attention importance 2 times lower than ffn importance
+        #   - prune 30% of attention and 10% of ffn
+        relative_meta_pruning_coefficient = (
+            torch.softmax(-1 * relative_meta_importance, dim=0) * relative_meta_importance.shape[0]
+        )
+        print("Relative meta importance", relative_meta_importance)
+        print("Relative meta pruning coefficient", relative_meta_pruning_coefficient)
+        attention_heads_pruning_ratio = (
+            pruning_ratio * relative_meta_pruning_coefficient[0].item()
+            if do_prune_attention_heads or do_prune_attention_heads_uniform
+            else 0
+        )
+        attention_layers_pruning_ratio = (
+            pruning_ratio * relative_meta_pruning_coefficient[1].item() if do_prune_attention_layers else 0
+        )
+        ffn_neurons_pruning_ratio = (
+            pruning_ratio * relative_meta_pruning_coefficient[2].item()
+            if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform
+            else 0
+        )
+        ffn_layers_pruning_ratio = (
+            pruning_ratio * relative_meta_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
+        )
+        hidden_states_pruning_ratio = (
+            pruning_ratio * relative_meta_pruning_coefficient[4].item() if do_prune_hidden_state else 0
+        )
     else:
         assert False, f"Unknown how_to_overlap: {how_to_overlap}"
-    print('  attention_heads_pruning_ratio', attention_heads_pruning_ratio)
-    print('  attention_layers_pruning_ratio', attention_layers_pruning_ratio)
-    print('  ffn_neurons_pruning_ratio', ffn_neurons_pruning_ratio)
-    print('  ffn_layers_pruning_ratio', ffn_layers_pruning_ratio)
-    print('  hidden_states_pruning_ratio', hidden_states_pruning_ratio)
-
+    print("  attention_heads_pruning_ratio", attention_heads_pruning_ratio)
+    print("  attention_layers_pruning_ratio", attention_layers_pruning_ratio)
+    print("  ffn_neurons_pruning_ratio", ffn_neurons_pruning_ratio)
+    print("  ffn_layers_pruning_ratio", ffn_layers_pruning_ratio)
+    print("  hidden_states_pruning_ratio", hidden_states_pruning_ratio)
 
     # Select components to prune
     attention_layers_to_prune = select_to_prune_attention_layers(
-        components_importance.attention_layers_importance, attention_layers_pruning_ratio,
+        components_importance.attention_layers_importance,
+        attention_layers_pruning_ratio,
     )
     attention_heads_to_prune = select_to_prune_attention_heads(
         components_importance.attention_heads_importance,
@@ -280,13 +335,12 @@ def main(
         key_value_group_size=config.num_attention_heads // config.num_key_value_heads,
     )
     attention_heads_to_prune = {
-        layer: heads
-        for layer, heads in attention_heads_to_prune.items()
-        if layer not in attention_layers_to_prune
+        layer: heads for layer, heads in attention_heads_to_prune.items() if layer not in attention_layers_to_prune
     }
 
     ffn_layers_to_prune = select_to_prune_ffn_layers(
-        components_importance.ffn_layers_importance, ffn_layers_pruning_ratio,
+        components_importance.ffn_layers_importance,
+        ffn_layers_pruning_ratio,
     )
     neurons_to_prune = select_to_prune_ffn_neurons(
         components_importance.ffn_neurons_importance,
@@ -297,7 +351,8 @@ def main(
         layer: neurons for layer, neurons in neurons_to_prune.items() if layer not in attention_layers_to_prune
     }
     hidden_states_to_prune = select_to_prune_hidden_states(
-        components_importance.hidden_states_importance, hidden_states_pruning_ratio,
+        components_importance.hidden_states_importance,
+        hidden_states_pruning_ratio,
     )
 
     # prune
@@ -331,10 +386,10 @@ def main(
                 config.num_key_value_heads - model.model.layers[layer].self_attn.k_proj.out_features // head_dim
             )
             total_num_heads_deleted += num_heads_deleted
-            print(f"> Layer {layer}: {num_heads_deleted} attention heads deleted ({num_grouped_heads_deleted} grouped heads deleted)")
-        total_percent_heads_deleted = total_num_heads_deleted / (
-            config.num_attention_heads * config.num_hidden_layers
-        )
+            print(
+                f"> Layer {layer}: {num_heads_deleted} attention heads deleted ({num_grouped_heads_deleted} grouped heads deleted)"
+            )
+        total_percent_heads_deleted = total_num_heads_deleted / (config.num_attention_heads * config.num_hidden_layers)
         print(
             f"Total: {total_percent_heads_deleted * 100:.2f}% attention heads deleted, "
             f"{(1 - total_percent_heads_deleted) * 100:.2f}% remain"
@@ -356,9 +411,7 @@ def main(
         # print layers and number of neurons deleted in FF
         total_num_neurons_deleted = 0
         for layer in range(config.num_hidden_layers):
-            num_neurons_deleted = (
-                config.intermediate_size - model.model.layers[layer].mlp.up_proj.out_features
-            )
+            num_neurons_deleted = config.intermediate_size - model.model.layers[layer].mlp.up_proj.out_features
             total_num_neurons_deleted += num_neurons_deleted
             print(f"> Layer {layer}: {num_neurons_deleted} neurons deleted")
         total_percent_neurons_deleted = total_num_neurons_deleted / (
@@ -368,13 +421,13 @@ def main(
             f"Total: {total_percent_neurons_deleted * 100:.2f}% neurons deleted, "
             f"{(1 - total_percent_neurons_deleted) * 100:.2f}% remain"
         )
-    
+
     print("-" * 80)
     pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
     neptune_run["pruned_stats"] = pruned_model_stats
 
     if save_model_as:
-        save_model_tokenizer(model, tokenizer, "results/"+save_model_as)
+        save_model_tokenizer(model, tokenizer, "results/" + save_model_as)
 
     # Log pruned model
     if evaluate_on:
@@ -383,7 +436,7 @@ def main(
             model=model,
             tokenizer=tokenizer,
             task_groups=evaluate_on,
-            device='cuda' if IS_CUDA_AVAILABLE else 'cpu',
+            device="cuda" if IS_CUDA_AVAILABLE else "cpu",
         )
         neptune_run["evaluation"] = eval_results
 

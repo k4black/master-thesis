@@ -4,7 +4,6 @@ import typing
 from pathlib import Path
 from typing import Optional
 
-import neptune
 import torch
 import typer
 from transformers import LlamaTokenizer
@@ -20,19 +19,16 @@ if typing.TYPE_CHECKING:
     from external.llm_pruner.LLMPruner.models.hf_llama.modeling_llama import (
         LlamaAttention,
         LlamaForCausalLM,
-        LlamaMLP,
         LlamaRMSNorm,
     )
     from external.llm_pruner.LLMPruner.pruner import hf_llama_pruner as llama_pruner
-    from external.llm_pruner.LLMPruner.utils.logger import LoggerWithDepth
 else:
     # add external.llm_pruner to access LLMPruner
     os.sys.path.append((Path(__file__).parent / "external" / "llm_pruner").as_posix())
     import LLMPruner.torch_pruning as tp
     from LLMPruner.pruner import hf_llama_pruner as llama_pruner
-    from LLMPruner.utils.logger import LoggerWithDepth
     from LLMPruner.datasets.example_samples import get_examples
-    from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention, LlamaMLP
+    from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 from utils import create_neptune_run, evaluate_model, save_model_tokenizer, set_random_seed
 
@@ -62,19 +58,28 @@ def main(
     iterative_steps: int = 1,
     grouping_strategy: str = "sum",
     global_pruning: bool = False,
-    num_examples: int = 10, # number of examples to use for calibration
+    num_examples: int = 10,  # number of examples to use for calibration
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+toxicity",
     save_model_as: Optional[str] = None,
 ):
     set_random_seed(seed)
 
+    if block_wise:
+        pruning_components = ["attn-heads", "ffn-neurons"]
+    elif channel_wise:
+        pruning_components = ["hidden-state"]
+    elif layer_wise:
+        pruning_components = ["attn-layers", "ffn-layers"]
+    else:
+        raise ValueError("Please specify one of block_wise, channel_wise, layer_wise")
+
     # setup logging
     neptune_run = create_neptune_run(
         base_model=base_model,
         lib="llm-pruner",
         pruning_ratio=pruning_ratio,
-        pruning_components=["attn-heads", "ffn-neurons"] if block_wise else ["hidden-state"] if channel_wise else ["attn-layers", "ffn-layers"] if layer_wise else [],
+        pruning_components=pruning_components,
         calibration_dataset="bookcorpus",
         calibration_batch_size=1,
         calibration_num_samples=num_examples,
@@ -195,7 +200,7 @@ def main(
             "importance": imp,
             "global_pruning": global_pruning,
             "iterative_steps": iterative_steps,
-            "ch_sparsity": pruning_ratio,  # remove 50% channels, ResNet18 = {64, 128, 256, 512} => ResNet18_Half = {32, 64, 128, 256}
+            "ch_sparsity": pruning_ratio,  # remove 50% channels
             "ignored_layers": [],
             # "round_to": model.config.num_attention_heads * 2,
             "channel_groups": {
@@ -217,7 +222,12 @@ def main(
             print(f"Iter {i + 1}/{iterative_steps}")
 
             if pruner_type in ["taylor"]:
-                example_prompts = get_examples("bookcorpus", tokenizer, n_samples=num_examples, seq_len=max_seq_len).to(model.device)
+                example_prompts = get_examples(
+                    "bookcorpus",
+                    tokenizer,
+                    n_samples=num_examples,
+                    seq_len=max_seq_len,
+                ).to(model.device)
                 print(f"Start Backwarding in iterative steps = {i}...")
                 loss = model(example_prompts, labels=example_prompts).loss
                 print(f"Loss = {loss}")
@@ -227,7 +237,8 @@ def main(
 
             after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(
-                f"After Iter {i + 1}/{iterative_steps}, #parameters: {after_pruning_parameters}, Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
+                f"After Iter {i + 1}/{iterative_steps}, #parameters: {after_pruning_parameters}, "
+                f"Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
             )
 
         # Clean the gradient in the model
@@ -250,7 +261,8 @@ def main(
         raise NotImplementedError
 
     print(
-        f"#Param before: {before_pruning_parameters}, #Param after: {after_pruning_parameters}, Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
+        f"#Param before: {before_pruning_parameters}, #Param after: {after_pruning_parameters}, "
+        f"Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
     )
 
     print("-" * 80)
@@ -258,16 +270,10 @@ def main(
     neptune_run["pruned_stats"] = pruned_model_stats
 
     if save_model_as:
-        save_model_tokenizer(model, tokenizer, "results/"+save_model_as)
+        save_model_tokenizer(model, tokenizer, "results/" + save_model_as)
 
-    print('-'*64)
+    print("-" * 64)
     print(model)
-    # summary(model, input_data=forward_prompts, depth=4, device=eval_device)
-    # go layer by layer and print actual size of model.model.layers[i].self_attn params and model.model.layers[i].mlp params
-    # for i, layer in enumerate(model.model.layers):
-    #     print(f"Layer {i}")
-    #     print(f"  Attention: {layer.self_attn.q_proj.weight.shape} (q_proj), {layer.self_attn.k_proj.weight.shape} (k_proj), {layer.self_attn.v_proj.weight.shape} (v_proj), {layer.self_attn.o_proj.weight.shape} (o_proj)")
-    #     print(f"  MLP: {layer.mlp.gate_proj.weight.shape} (gate_proj), {layer.mlp.up_proj.weight.shape} (up_proj), {layer.mlp.down_proj.weight.shape} (down_proj)")
 
     model.config.pad_token_id = tokenizer.pad_token_id = 0
     model.config.bos_token_id = 1
@@ -279,7 +285,7 @@ def main(
             model=model,
             tokenizer=tokenizer,
             task_groups=evaluate_on,
-            device='cuda' if IS_CUDA_AVAILABLE else 'cpu',
+            device="cuda" if IS_CUDA_AVAILABLE else "cpu",
         )
         neptune_run["evaluation"] = eval_results
 

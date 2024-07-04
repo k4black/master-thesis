@@ -10,20 +10,13 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_unreachable = true
 allow_untyped_decorators = true
-exclude = [
-    "external/",
-    "tests/",
-    ".tmp/",
-    ".venv/"
-]
+exclude = ["external/", "tests/", ".tmp/", ".venv/"]
 
 [tool.pytest.ini_options]
 pythonpath = "."
 minversion = "6.0"
 addopts = "--cov=adaptive_pruning/ --cov-report=term-missing --cov-report=xml"
-testpaths = [
-    "tests",
-]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
@@ -77,9 +70,15 @@ line_length = 120
 lines_after_imports = 2
 combine_as_imports = true
 default_section = "THIRDPARTY"
-known_first_party = "adaptive_pruning,tests"
+known_first_party = ["utils", "adaptive_pruning", "tests", "external"]
 
 [tool.black]
 line-length = 120
 target-version = ['py312']
-extend-exclude = "external/"
+include = '\.py?$'
+ extend-exclude = '''
+ /(
+   external/
+   | run_slurm_jobs.sh
+ )
+ '''

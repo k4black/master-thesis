@@ -3,11 +3,13 @@ from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
-from transformers import PreTrainedModel, LlamaForCausalLM
+from transformers import PreTrainedModel
 from transformers.pytorch_utils import prune_linear_layer
 
 
-def llama_prune_out_channels(layer: nn.Module, heads_indexes: Sequence[int], num_heads: int, head_dim: int) -> nn.Module:
+def llama_prune_out_channels(
+    layer: nn.Module, heads_indexes: Sequence[int], num_heads: int, head_dim: int
+) -> nn.Module:
     # print("Prune IDX in HFAttentionPruner: ", idxs)
     # convert head indexes to neuron indexes e.g [0] -> [0, .., head_dim-1]
     idxs = [i * layer.head_dim + j for i in heads_indexes for j in range(head_dim)]
@@ -25,9 +27,7 @@ def llama_prune_out_channels(layer: nn.Module, heads_indexes: Sequence[int], num
         keep_idxs = list(set(range(sub_layer.in_features)) - set(idxs))
         keep_idxs.sort()
         sub_layer.in_features = sub_layer.in_features - len(idxs)
-        sub_layer.weight = torch.nn.Parameter(
-            sub_layer.weight.data[:, keep_idxs]
-        )
+        sub_layer.weight = torch.nn.Parameter(sub_layer.weight.data[:, keep_idxs])
 
     return layer
 
@@ -64,9 +64,18 @@ def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list
                 #   [1, 7] -> index_to_keep_grouped=[0...head_dim-1, 3*head_dim...4*head_dim-1]
                 #   [1, 7] -> index_to_keep_full=index_to_keep_grouped repeat_interleave 2=[0, 1, 3, 4, 5, 6]
                 heads_grouped = list(set([i // num_heads_per_group for i in heads]))
-                heads_not_grouped = [i * num_heads_per_group + j for i in heads_grouped for j in range(num_heads_per_group)]
-                index_to_keep_grouped = torch.LongTensor(list(set(range(num_grouped_heads*head_dim)) - {i * head_dim + j for i in heads_grouped for j in range(head_dim)}))
-                index_to_keep_full = torch.LongTensor([i * num_heads_per_group + j for i in index_to_keep_grouped for j in range(num_heads_per_group)])
+                # heads_not_grouped = [
+                #     i * num_heads_per_group + j for i in heads_grouped for j in range(num_heads_per_group)
+                # ]
+                index_to_keep_grouped = torch.LongTensor(
+                    list(
+                        set(range(num_grouped_heads * head_dim))
+                        - {i * head_dim + j for i in heads_grouped for j in range(head_dim)}
+                    )
+                )
+                index_to_keep_full = torch.LongTensor(
+                    [i * num_heads_per_group + j for i in index_to_keep_grouped for j in range(num_heads_per_group)]
+                )
 
                 # Prune values
                 attention_layer.q_proj = prune_linear_layer(attention_layer.q_proj, index_to_keep_full)
@@ -164,17 +173,17 @@ def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[i
         #         neurons_indexes_to_keep,
         #         dim=dim,
         #     )
-            # # code in `prune_linear_layer` slow down the inference
-            # # so re-create nn.Linear with the same weight and bias
-            # weights = param.dense.weight
-            # bias = param.dense.bias
-            # param.dense = nn.Linear(
-            #     param.dense.in_features,
-            #     param.dense.out_features,
-            #     device=param.dense.weight.device,
-            # )
-            # param.dense.weight = nn.Parameter(weights, requires_grad=weights.requires_grad)
-            # param.dense.bias = nn.Parameter(bias, requires_grad=bias.requires_grad)
+        # # code in `prune_linear_layer` slow down the inference
+        # # so re-create nn.Linear with the same weight and bias
+        # weights = param.dense.weight
+        # bias = param.dense.bias
+        # param.dense = nn.Linear(
+        #     param.dense.in_features,
+        #     param.dense.out_features,
+        #     device=param.dense.weight.device,
+        # )
+        # param.dense.weight = nn.Parameter(weights, requires_grad=weights.requires_grad)
+        # param.dense.bias = nn.Parameter(bias, requires_grad=bias.requires_grad)
 
 
 def prune_ffn_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None:
@@ -349,10 +358,10 @@ def prune_hidden_state(model: PreTrainedModel, neurons_to_prune: list[int]) -> N
 
 
 def select_to_prune_attention_heads(
-        importance_scores: torch.Tensor,
-        percent_heads_to_prune: float,
-        uniform_among_layers: bool = False,
-        key_value_group_size: int = 1,
+    importance_scores: torch.Tensor,
+    percent_heads_to_prune: float,
+    uniform_among_layers: bool = False,
+    key_value_group_size: int = 1,
 ) -> dict[int, list[int]]:
     """
     Select least-k attention heads based on the importance scores.
@@ -368,11 +377,15 @@ def select_to_prune_attention_heads(
     :return: A dictionary with the layer indices as keys and a list of head indices to prune as values
     """
     assert 0 <= percent_heads_to_prune <= 1, "percent_heads_to_prune should be in [0, 1]"
-    assert 1 <= key_value_group_size <= importance_scores.size(1), "key_value_group_size should be in [1, num_attention_heads]"
+    assert (
+        1 <= key_value_group_size <= importance_scores.size(1)
+    ), "key_value_group_size should be in [1, num_attention_heads]"
 
     # shrink the importance scores to the grouped size by averaging
     if key_value_group_size != 1:
-        importance_scores = importance_scores.view(importance_scores.size(0), importance_scores.size(1) // key_value_group_size, key_value_group_size).mean(dim=-1)
+        importance_scores = importance_scores.view(
+            importance_scores.size(0), importance_scores.size(1) // key_value_group_size, key_value_group_size
+        ).mean(dim=-1)
 
     heads_to_prune = {}
     num_layers, num_heads = importance_scores.size()
@@ -440,7 +453,7 @@ def select_to_prune_attention_layers(importance_scores: torch.Tensor, percent_la
 
 
 def select_to_prune_ffn_neurons(
-        importance_scores: torch.Tensor, percent_neurons_to_prune: float, uniform_among_layers: bool = False
+    importance_scores: torch.Tensor, percent_neurons_to_prune: float, uniform_among_layers: bool = False
 ) -> dict[int, list[int]]:
     """
     Select least-k feed forward neurons based on the importance scores.

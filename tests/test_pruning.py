@@ -1,18 +1,28 @@
 import copy
 
 import pytest
-from transformers import PreTrainedModel
 import torch
+from transformers import PreTrainedModel
 
+from adaptive_pruning.nullify import (
+    nullify_attention_heads,
+    nullify_attention_layers,
+    nullify_ffn_layers,
+    nullify_ffn_neurons,
+    nullify_hidden_state,
+)
 from adaptive_pruning.pruning import (
-    prune_attention_heads, prune_attention_layers, prune_ffn_neurons, prune_ffn_layers, prune_hidden_state,
-    select_to_prune_attention_heads, select_to_prune_attention_layers, select_to_prune_ffn_neurons,
-    select_to_prune_ffn_layers
+    prune_attention_heads,
+    prune_attention_layers,
+    prune_ffn_layers,
+    prune_ffn_neurons,
+    prune_hidden_state,
+    select_to_prune_attention_heads,
+    select_to_prune_attention_layers,
+    select_to_prune_ffn_layers,
+    select_to_prune_ffn_neurons,
 )
 from adaptive_pruning.utils import count_flops_macs_params, count_total_parameters
-from adaptive_pruning.nullify import (
-    nullify_attention_heads, nullify_attention_layers, nullify_ffn_neurons, nullify_ffn_layers, nullify_hidden_state,
-)
 
 
 class TestPruneAttentionHeads:
@@ -23,8 +33,9 @@ class TestPruneAttentionHeads:
 
         if model.config.model_type == "bert":
             for i, layer in enumerate(model.encoder.layer):
-                assert layer.attention.self.num_attention_heads == expected_heads[i], \
-                    f"Layer {i}: expected {expected_heads[i]} heads, got {layer.attention.self.num_attention_heads}"
+                assert (
+                    layer.attention.self.num_attention_heads == expected_heads[i]
+                ), f"Layer {i}: expected {expected_heads[i]} heads, got {layer.attention.self.num_attention_heads}"
 
                 assert layer.attention.self.query.out_features == head_size * expected_heads[i], f"Layer {i}"
                 assert layer.attention.output.dense.in_features == head_size * expected_heads[i], f"Layer {i}"
@@ -32,14 +43,20 @@ class TestPruneAttentionHeads:
         elif model.config.model_type == "llama":
             num_heads_per_group = model.config.num_attention_heads // model.config.num_key_value_heads
             for i, layer in enumerate(model.layers):
-                assert layer.self_attn.num_heads == expected_heads[i], \
-                    f"Layer {i}: expected {expected_heads[i]} heads, got {layer.self_attn.num_heads}"
-                assert layer.self_attn.num_key_value_heads == expected_heads[i] // num_heads_per_group, \
-                    f"Layer {i}: expected {expected_heads[i] // num_heads_per_group} key-value heads, got {layer.self_attn.num_key_value_heads}"
+                assert (
+                    layer.self_attn.num_heads == expected_heads[i]
+                ), f"Layer {i}: expected {expected_heads[i]} heads, got {layer.self_attn.num_heads}"
+                assert (
+                    layer.self_attn.num_key_value_heads == expected_heads[i] // num_heads_per_group
+                ), f"Layer {i}: expected {expected_heads[i] // num_heads_per_group} key-value heads, got {layer.self_attn.num_key_value_heads}"
 
                 assert layer.self_attn.q_proj.out_features == head_size * expected_heads[i], f"Layer {i} q_proj error"
-                assert layer.self_attn.k_proj.out_features == head_size * expected_heads[i] // num_heads_per_group, f"Layer {i} k_proj error"
-                assert layer.self_attn.v_proj.out_features == head_size * expected_heads[i] // num_heads_per_group, f"Layer {i} v_proj error"
+                assert (
+                    layer.self_attn.k_proj.out_features == head_size * expected_heads[i] // num_heads_per_group
+                ), f"Layer {i} k_proj error"
+                assert (
+                    layer.self_attn.v_proj.out_features == head_size * expected_heads[i] // num_heads_per_group
+                ), f"Layer {i} v_proj error"
                 assert layer.self_attn.o_proj.in_features == head_size * expected_heads[i], f"Layer {i} o_proj error"
 
     @pytest.mark.parametrize(
@@ -54,7 +71,10 @@ class TestPruneAttentionHeads:
         ],
     )
     def test_num_heads_bert(
-        self, bert_lm_test_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
+        self,
+        bert_lm_test_model: PreTrainedModel,
+        heads_to_prune: dict[int, list[int]],
+        expected_heads: list[int],
     ) -> None:
         self._assert_attention_heads_number_by_layer(bert_lm_test_model, [4, 4])
 
@@ -75,7 +95,10 @@ class TestPruneAttentionHeads:
         ],
     )
     def test_num_heads_llama(
-        self, llama_lm_test_model: PreTrainedModel, heads_to_prune: dict[int, list[int]], expected_heads: list[int],
+        self,
+        llama_lm_test_model: PreTrainedModel,
+        heads_to_prune: dict[int, list[int]],
+        expected_heads: list[int],
     ) -> None:
         self._assert_attention_heads_number_by_layer(llama_lm_test_model, [4, 4])
 
@@ -92,9 +115,7 @@ class TestPruneAttentionHeads:
             {0: [0, 1, 2, 3], 1: [0, 1, 2, 3]},
         ],
     )
-    def test_less_params(
-        self, test_lm_model: PreTrainedModel, heads_to_prune: dict[int, list[int]]
-    ) -> None:
+    def test_less_params(self, test_lm_model: PreTrainedModel, heads_to_prune: dict[int, list[int]]) -> None:
         params_before = count_total_parameters(test_lm_model)
 
         prune_attention_heads(test_lm_model, heads_to_prune)
@@ -117,10 +138,12 @@ class TestPruneAttentionHeads:
         assert bert_test_model.encoder.layer[0].attention.self.query.bias.requires_grad == old_requires_grad_bias
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             head_index = 0
@@ -130,7 +153,9 @@ class TestPruneAttentionHeads:
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_attention_heads(nullified_model, heads_to_prune)
             # get output of the nullified model
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
@@ -138,7 +163,9 @@ class TestPruneAttentionHeads:
             # prune the first head of the first layer
             prune_attention_heads(test_lm_model, heads_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
@@ -176,7 +203,10 @@ class TestAttentionLayerPruning:
         ],
     )
     def test_layer_pruning(
-        self, test_lm_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
+        self,
+        test_lm_model: PreTrainedModel,
+        layers_to_prune: list[int],
+        expected_layers: list[bool],
     ) -> None:
         self._assert_attention_layers_existence(test_lm_model, [True, True])
 
@@ -198,10 +228,12 @@ class TestAttentionLayerPruning:
         assert bert_test_model.encoder.layer[0].attention.output.dense.weight.requires_grad == old_requires_grad
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             layer_index = 0
@@ -211,7 +243,9 @@ class TestAttentionLayerPruning:
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_attention_layers(nullified_model, layers_to_prune)
             # get output of the nullified model
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
@@ -219,7 +253,9 @@ class TestAttentionLayerPruning:
             # prune the first layer
             prune_attention_layers(test_lm_model, layers_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
@@ -235,19 +271,24 @@ class TestPruneFeedForwardNeurons:
 
         if architecture == "bert":
             for i, layer in enumerate(model.encoder.layer):
-                assert layer.intermediate.dense.out_features == expected_neurons[i], \
-                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.intermediate.dense.out_features}"
-                assert layer.output.dense.in_features == expected_neurons[i], \
-                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.output.dense.in_features}"
+                assert (
+                    layer.intermediate.dense.out_features == expected_neurons[i]
+                ), f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.intermediate.dense.out_features}"
+                assert (
+                    layer.output.dense.in_features == expected_neurons[i]
+                ), f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.output.dense.in_features}"
 
         elif architecture == "llama":
             for i, layer in enumerate(model.layers):
-                assert layer.mlp.gate_proj.out_features == expected_neurons[i], \
-                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.gate_proj.out_features}"
-                assert layer.mlp.up_proj.out_features == expected_neurons[i], \
-                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.up_proj.out_features}"
-                assert layer.mlp.down_proj.in_features == expected_neurons[i], \
-                    f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.down_proj.in_features}"
+                assert (
+                    layer.mlp.gate_proj.out_features == expected_neurons[i]
+                ), f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.gate_proj.out_features}"
+                assert (
+                    layer.mlp.up_proj.out_features == expected_neurons[i]
+                ), f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.up_proj.out_features}"
+                assert (
+                    layer.mlp.down_proj.in_features == expected_neurons[i]
+                ), f"Layer {i} expected {expected_neurons[i]} neurons, got {layer.mlp.down_proj.in_features}"
 
         else:
             raise ValueError(f"Unsupported architecture: {architecture}")
@@ -263,7 +304,10 @@ class TestPruneFeedForwardNeurons:
         ],
     )
     def test_num_neurons(
-        self, test_lm_model: PreTrainedModel, neurons_to_prune: dict[int, list[int]], expected_neurons: list[int],
+        self,
+        test_lm_model: PreTrainedModel,
+        neurons_to_prune: dict[int, list[int]],
+        expected_neurons: list[int],
     ) -> None:
         self._assert_feed_forward_neurons_number_by_layer(test_lm_model, [128, 128])
 
@@ -283,14 +327,18 @@ class TestPruneFeedForwardNeurons:
         prune_ffn_neurons(bert_test_model, neurons_to_prune)
 
         # check that the model requires grad
-        assert bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
+        assert (
+            bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
+        )
         assert bert_test_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             neurons_to_prune = {0: [0, 10, *range(50, 60), 127]}
@@ -299,7 +347,9 @@ class TestPruneFeedForwardNeurons:
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_ffn_neurons(nullified_model, neurons_to_prune)
             # get output of the nullified model
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert original_last_hidden_state.shape == nullified_last_hidden_state.shape
@@ -308,7 +358,9 @@ class TestPruneFeedForwardNeurons:
             # prune the first neuron of the first layer
             prune_ffn_neurons(test_lm_model, neurons_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the pruned model is different from the original model
             assert original_last_hidden_state.shape == pruned_last_hidden_state.shape
@@ -327,35 +379,45 @@ class TestPruneFeedForwardLayers:
         if architecture == "bert":
             for i, layer in enumerate(model.encoder.layer):
                 if expected_layers[i]:
-                    assert layer.intermediate.dense.out_features == model.config.intermediate_size, \
-                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
-                         f"got {layer.intermediate.dense.out_features}")
-                    assert layer.output.dense.in_features == model.config.intermediate_size, \
-                        f"Layer {i} expected {model.config.intermediate_size} neurons, got {layer.output.dense.in_features}"
+                    assert layer.intermediate.dense.out_features == model.config.intermediate_size, (
+                        f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                        f"got {layer.intermediate.dense.out_features}"
+                    )
+                    assert (
+                        layer.output.dense.in_features == model.config.intermediate_size
+                    ), f"Layer {i} expected {model.config.intermediate_size} neurons, got {layer.output.dense.in_features}"
                 else:
-                    assert layer.intermediate.dense.out_features == 0, \
-                        f"Layer {i} expected 0 neurons, got {layer.intermediate.dense.out_features}"
-                    assert layer.output.dense.in_features == 0, \
-                        f"Layer {i} expected 0 neurons, got {layer.output.dense.in_features}"
+                    assert (
+                        layer.intermediate.dense.out_features == 0
+                    ), f"Layer {i} expected 0 neurons, got {layer.intermediate.dense.out_features}"
+                    assert (
+                        layer.output.dense.in_features == 0
+                    ), f"Layer {i} expected 0 neurons, got {layer.output.dense.in_features}"
         elif architecture == "llama":
             for i, layer in enumerate(model.layers):
                 if expected_layers[i]:
-                    assert layer.mlp.gate_proj.out_features == model.config.intermediate_size, \
-                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
-                         f"got {layer.mlp.gate_proj.out_features}")
-                    assert layer.mlp.up_proj.out_features == model.config.intermediate_size, \
-                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
-                         f"got {layer.mlp.up_proj.out_features}")
-                    assert layer.mlp.down_proj.in_features == model.config.intermediate_size, \
-                        (f"Layer {i} expected {model.config.intermediate_size} neurons, "
-                            f"got {layer.mlp.down_proj.in_features}")
+                    assert layer.mlp.gate_proj.out_features == model.config.intermediate_size, (
+                        f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                        f"got {layer.mlp.gate_proj.out_features}"
+                    )
+                    assert layer.mlp.up_proj.out_features == model.config.intermediate_size, (
+                        f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                        f"got {layer.mlp.up_proj.out_features}"
+                    )
+                    assert layer.mlp.down_proj.in_features == model.config.intermediate_size, (
+                        f"Layer {i} expected {model.config.intermediate_size} neurons, "
+                        f"got {layer.mlp.down_proj.in_features}"
+                    )
                 else:
-                    assert layer.mlp.gate_proj.out_features == 0, \
-                        f"Layer {i} expected 0 neurons, got {layer.mlp.gate_proj.out_features}"
-                    assert layer.mlp.up_proj.out_features == 0, \
-                        f"Layer {i} expected 0 neurons, got {layer.mlp.up_proj.out_features}"
-                    assert layer.mlp.down_proj.in_features == 0, \
-                        f"Layer {i} expected 0 neurons, got {layer.mlp.down_proj.in_features}"
+                    assert (
+                        layer.mlp.gate_proj.out_features == 0
+                    ), f"Layer {i} expected 0 neurons, got {layer.mlp.gate_proj.out_features}"
+                    assert (
+                        layer.mlp.up_proj.out_features == 0
+                    ), f"Layer {i} expected 0 neurons, got {layer.mlp.up_proj.out_features}"
+                    assert (
+                        layer.mlp.down_proj.in_features == 0
+                    ), f"Layer {i} expected 0 neurons, got {layer.mlp.down_proj.in_features}"
 
     @pytest.mark.parametrize(
         "layers_to_prune, expected_layers",
@@ -366,7 +428,10 @@ class TestPruneFeedForwardLayers:
         ],
     )
     def test_layer_pruning(
-        self, test_lm_model: PreTrainedModel, layers_to_prune: list[int], expected_layers: list[bool],
+        self,
+        test_lm_model: PreTrainedModel,
+        layers_to_prune: list[int],
+        expected_layers: list[bool],
     ) -> None:
         self._assert_feed_forward_layers_existence(test_lm_model, [True, True])
 
@@ -386,14 +451,18 @@ class TestPruneFeedForwardLayers:
         prune_ffn_layers(bert_test_model, layers_to_prune)
 
         # check that the model requires grad
-        assert bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
+        assert (
+            bert_test_model.encoder.layer[0].intermediate.dense.weight.requires_grad == old_requires_grad_intermediate
+        )
         assert bert_test_model.encoder.layer[0].output.dense.weight.requires_grad == old_requires_grad_output
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             layers_to_prune = [0]
@@ -402,7 +471,9 @@ class TestPruneFeedForwardLayers:
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_ffn_layers(nullified_model, layers_to_prune)
             # get output of the nullified model
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
@@ -410,7 +481,9 @@ class TestPruneFeedForwardLayers:
             # prune the first layer
             prune_ffn_layers(test_lm_model, layers_to_prune)
             # get output of the pruned model
-            pruned_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            pruned_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the pruned model is different from the original model
             assert not torch.allclose(pruned_last_hidden_state, original_last_hidden_state)
@@ -454,10 +527,13 @@ class TestPruneHiddenState:
             ([0, 1, 2], 61),
             (list(range(60)), 4),
             ([0, 1, 51, *range(10, 20)], 51),
-        ]
+        ],
     )
     def test_num_neurons(
-        self, bert_test_model: PreTrainedModel, neurons_to_prune: list[int], expected_hidden_state: int,
+        self,
+        bert_test_model: PreTrainedModel,
+        neurons_to_prune: list[int],
+        expected_hidden_state: int,
     ) -> None:
         self._assert_hidden_state_neurons_number(bert_test_model, 64)
 
@@ -467,8 +543,13 @@ class TestPruneHiddenState:
 
     def test_pass_with_correct_dim(self, bert_test_model: PreTrainedModel, random_input_batch) -> None:
         # get output of the original model
-        original_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
-        assert original_last_hidden_state.shape == (*random_input_batch["input_ids"].shape, bert_test_model.config.hidden_size)
+        original_last_hidden_state = bert_test_model(
+            random_input_batch["input_ids"], random_input_batch["attention_mask"]
+        )[0]
+        assert original_last_hidden_state.shape == (
+            *random_input_batch["input_ids"].shape,
+            bert_test_model.config.hidden_size,
+        )
 
         # set params
         neurons_to_prune = [0, 1, 63, *range(10, 20)]
@@ -476,9 +557,10 @@ class TestPruneHiddenState:
         # prune the hidden state
         prune_hidden_state(bert_test_model, neurons_to_prune)
         # get output of the pruned model
-        pruned_last_hidden_state = bert_test_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+        pruned_last_hidden_state = bert_test_model(
+            random_input_batch["input_ids"], random_input_batch["attention_mask"]
+        )[0]
         assert pruned_last_hidden_state.shape == (*random_input_batch["input_ids"].shape, 51)
-
 
 
 class TestSelectAttentionHeads:
@@ -501,13 +583,13 @@ class TestSelectAttentionHeads:
             (torch.tensor([[0.6, 0.3, 0.1, -1.0], [0.5, 0.2, 0.3, 0.4]]), 0.25, {0: [3, 2]}),
             # 2 layers, 4 heads, 50% to prune - one layer less important
             (torch.tensor([[0.6, 0.1, 0.1, 0.1], [0.5, 0.2, 0.3, 0.4]]), 0.5, {0: [1, 2, 3], 1: [1]}),
-        ]
+        ],
     )
     def test_simple_cases_global(
-            self,
-            importance_scores: torch.Tensor,
-            percent_heads_to_prune: float,
-            expected_heads_to_prune: dict[int, list[int]]
+        self,
+        importance_scores: torch.Tensor,
+        percent_heads_to_prune: float,
+        expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
         selected_heads = select_to_prune_attention_heads(importance_scores, percent_heads_to_prune)
         assert selected_heads == expected_heads_to_prune
@@ -519,13 +601,13 @@ class TestSelectAttentionHeads:
             (torch.tensor([[0.6, 0.3], [0.1, 0.2]]), 1.0, {0: [1], 1: [0]}),
             # 2 layers, 2 heads, 50% to prune - one layer less important, but keep 1 head per layer
             (torch.tensor([[0.6, 0.3], [0.1, 0.2]]), 0.5, {1: [0]}),
-        ]
+        ],
     )
     def test_keep_at_least_one_head_global(
         self,
-            importance_scores: torch.Tensor,
-            percent_heads_to_prune: float,
-            expected_heads_to_prune: dict[int, list[int]]
+        importance_scores: torch.Tensor,
+        percent_heads_to_prune: float,
+        expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
         selected_heads = select_to_prune_attention_heads(importance_scores, percent_heads_to_prune)
         assert selected_heads == expected_heads_to_prune
@@ -541,15 +623,17 @@ class TestSelectAttentionHeads:
             (torch.tensor([[0.6, 0.3, 0.1, -1.0], [0.5, 0.2, 0.3, 0.4]]), 0.25, {0: [3], 1: [1]}),
             # 2 layers, 4 heads, 50% to prune - one layer less important
             (torch.tensor([[0.6, 0.1, 0.2, 0.1], [0.5, 0.2, 0.3, 0.4]]), 0.5, {0: [1, 3], 1: [1, 2]}),
-        ]
+        ],
     )
     def test_simple_cases_uniform(
-            self,
-            importance_scores: torch.Tensor,
-            percent_heads_to_prune: float,
-            expected_heads_to_prune: dict[int, list[int]]
+        self,
+        importance_scores: torch.Tensor,
+        percent_heads_to_prune: float,
+        expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
-        selected_heads = select_to_prune_attention_heads(importance_scores, percent_heads_to_prune, uniform_among_layers=True)
+        selected_heads = select_to_prune_attention_heads(
+            importance_scores, percent_heads_to_prune, uniform_among_layers=True
+        )
         assert selected_heads == expected_heads_to_prune
 
 
@@ -564,13 +648,13 @@ class TestSelectAttentionLayers:
             # 2 layers, 25% to prune
             (torch.tensor([0.6, 0.3]), 0.25, []),
             # 4 layers, 25% to prune
-            (torch.tensor([0.6, 0.3, -1.0, -.02]), 0.25, [2]),
+            (torch.tensor([0.6, 0.3, -1.0, -0.02]), 0.25, [2]),
             # 4 layers, 75% to prune
-            (torch.tensor([0.6, 0.3, -1.0, -.02]), 0.75, [2, 3, 1]),
-        ]
+            (torch.tensor([0.6, 0.3, -1.0, -0.02]), 0.75, [2, 3, 1]),
+        ],
     )
     def test_simple_cases(
-            self, importance_scores: torch.Tensor, percent_layers_to_prune: float, expected_layers_to_prune: list[int]
+        self, importance_scores: torch.Tensor, percent_layers_to_prune: float, expected_layers_to_prune: list[int]
     ) -> None:
         selected_layers = select_to_prune_attention_layers(importance_scores, percent_layers_to_prune)
         assert selected_layers == expected_layers_to_prune
@@ -588,13 +672,13 @@ class TestSelectFnnNeurons:
             (torch.tensor([[0.6, 0.3, 0.1, 0.2], [0.5, 0.2, 0.1, 0.4]]), 0.5, {0: [2, 3], 1: [2, 1]}),
             # 2 layers, 4 neurons, 50% to prune - one layer less important
             (torch.tensor([[0.6, 0.3, 0.1, 0.2], [0.5, 0.5, 0.5, 0.1]]), 0.5, {0: [2, 3, 1], 1: [3]}),
-        ]
+        ],
     )
     def test_simple_cases_global(
-            self,
-            importance_scores: torch.Tensor,
-            percent_neurons_to_prune: float,
-            expected_neurons_to_prune: dict[int, list[int]]
+        self,
+        importance_scores: torch.Tensor,
+        percent_neurons_to_prune: float,
+        expected_neurons_to_prune: dict[int, list[int]],
     ) -> None:
         selected_neurons = select_to_prune_ffn_neurons(importance_scores, percent_neurons_to_prune)
         assert selected_neurons == expected_neurons_to_prune
@@ -606,15 +690,17 @@ class TestSelectFnnNeurons:
             (torch.tensor([[0.6, 0.3, 0.1, 0.2]]), 0.5, {0: [2, 3]}),
             # 2 layers, 4 neurons, 50% to prune - one layer less important
             (torch.tensor([[0.6, 0.3, 0.1, 0.2], [0.5, 0.4, 0.5, 0.1]]), 0.5, {0: [2, 3], 1: [3, 1]}),
-        ]
+        ],
     )
     def test_simple_cases_uniform(
-            self,
-            importance_scores: torch.Tensor,
-            percent_neurons_to_prune: float,
-            expected_neurons_to_prune: dict[int, list[int]]
+        self,
+        importance_scores: torch.Tensor,
+        percent_neurons_to_prune: float,
+        expected_neurons_to_prune: dict[int, list[int]],
     ) -> None:
-        selected_neurons = select_to_prune_ffn_neurons(importance_scores, percent_neurons_to_prune, uniform_among_layers=True)
+        selected_neurons = select_to_prune_ffn_neurons(
+            importance_scores, percent_neurons_to_prune, uniform_among_layers=True
+        )
         assert selected_neurons == expected_neurons_to_prune
 
 
@@ -629,13 +715,13 @@ class TestSelectFnnLayers:
             # 2 layers, 25% to prune
             (torch.tensor([0.6, 0.3]), 0.25, []),
             # 4 layers, 25% to prune
-            (torch.tensor([0.6, 0.3, -1.0, -.02]), 0.25, [2]),
+            (torch.tensor([0.6, 0.3, -1.0, -0.02]), 0.25, [2]),
             # 4 layers, 75% to prune
-            (torch.tensor([0.6, 0.3, -1.0, -.02]), 0.75, [2, 3, 1]),
-        ]
+            (torch.tensor([0.6, 0.3, -1.0, -0.02]), 0.75, [2, 3, 1]),
+        ],
     )
     def test_simple_cases(
-            self, importance_scores: torch.Tensor, percent_layers_to_prune: float, expected_layers_to_prune: list[int]
+        self, importance_scores: torch.Tensor, percent_layers_to_prune: float, expected_layers_to_prune: list[int]
     ) -> None:
         selected_layers = select_to_prune_ffn_layers(importance_scores, percent_layers_to_prune)
         assert selected_layers == expected_layers_to_prune

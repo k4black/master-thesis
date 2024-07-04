@@ -1,6 +1,4 @@
-from . import pruning
-from . import injections
-from . import utils
+from . import injections, pruning, utils
 
 
 __all__ = [

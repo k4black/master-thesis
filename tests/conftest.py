@@ -1,8 +1,8 @@
 import pytest
 import torch
-from torch.utils.data import DataLoader
-from transformers import PreTrainedTokenizer, PreTrainedModel, DataCollatorWithPadding, PretrainedConfig
 from datasets import Dataset
+from torch.utils.data import DataLoader
+from transformers import DataCollatorWithPadding, PretrainedConfig, PreTrainedModel, PreTrainedTokenizer
 
 
 HF_TINY_BERT = "prajjwal1/bert-tiny"
@@ -11,6 +11,7 @@ HF_TINY_BERT = "prajjwal1/bert-tiny"
 @pytest.fixture
 def bert_test_config() -> PretrainedConfig:
     from transformers import BertConfig
+
     return BertConfig(
         num_hidden_layers=2,
         num_attention_heads=4,
@@ -28,6 +29,7 @@ def bert_test_config() -> PretrainedConfig:
 @pytest.fixture
 def bert_test_tokenizer(bert_test_config: PretrainedConfig) -> PreTrainedTokenizer:
     from transformers import BertTokenizer
+
     tokenizer = BertTokenizer.from_pretrained(HF_TINY_BERT)
     # reduce vocab size to match the config
     tokenizer.vocab = {k: v for k, v in tokenizer.vocab.items() if v < bert_test_config.vocab_size}
@@ -37,6 +39,7 @@ def bert_test_tokenizer(bert_test_config: PretrainedConfig) -> PreTrainedTokeniz
 @pytest.fixture()
 def bert_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import BertModel
+
     model = BertModel(bert_test_config)
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
@@ -49,6 +52,7 @@ def bert_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
 @pytest.fixture
 def bert_lm_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import BertForMaskedLM
+
     model = BertForMaskedLM(bert_test_config)
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
@@ -61,6 +65,7 @@ def bert_lm_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
 @pytest.fixture
 def bert_clf_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import BertForSequenceClassification
+
     model = BertForSequenceClassification(bert_test_config)
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
@@ -73,6 +78,7 @@ def bert_clf_test_model(bert_test_config: PretrainedConfig) -> PreTrainedModel:
 @pytest.fixture
 def llama_test_config() -> PretrainedConfig:
     from transformers import LlamaConfig
+
     return LlamaConfig(
         num_hidden_layers=2,
         num_attention_heads=4,
@@ -82,13 +88,14 @@ def llama_test_config() -> PretrainedConfig:
         max_position_embeddings=128,
         vocab_size=4096,
         hidden_dropout_prob=0.1,
-        attention_probs_dropout_prob=0.1
+        attention_probs_dropout_prob=0.1,
     )
 
 
 @pytest.fixture
 def llama_lm_test_model(llama_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import LlamaForCausalLM
+
     model = LlamaForCausalLM(llama_test_config)
     # init weights as random with a fixed seed
     generator = torch.Generator().manual_seed(42)
@@ -100,7 +107,7 @@ def llama_lm_test_model(llama_test_config: PretrainedConfig) -> PreTrainedModel:
 
 @pytest.fixture(params=["bert", "llama"])
 def test_lm_model(
-        request: pytest.FixtureRequest, bert_lm_test_model: PreTrainedModel, llama_lm_test_model: PreTrainedModel
+    request: pytest.FixtureRequest, bert_lm_test_model: PreTrainedModel, llama_lm_test_model: PreTrainedModel
 ) -> PreTrainedModel:
     if request.param == "bert":
         return bert_lm_test_model
@@ -112,7 +119,8 @@ def test_lm_model(
 
 @pytest.fixture
 def simple_mnli_dataset() -> Dataset:
-    from datasets import Dataset, Features, Value, ClassLabel
+    from datasets import ClassLabel, Dataset, Features, Value
+
     return Dataset.from_dict(
         {
             "premise": ["I like turtles", "I like pizza", "I like bananas", "I am a human"],
@@ -136,6 +144,7 @@ def random_input_batch() -> dict[str, torch.Tensor]:
     :return: [4, 10] input_ids, [4, 10] attention_mask, [4] label
     """
     import torch
+
     return {
         "input_ids": torch.randint(0, 100, (4, 10)),
         "attention_mask": torch.randint(0, 2, (4, 10)),
@@ -146,14 +155,16 @@ def random_input_batch() -> dict[str, torch.Tensor]:
 @pytest.fixture
 def random_dataloader(bert_test_tokenizer: PreTrainedTokenizer) -> DataLoader:
     return DataLoader(
-        Dataset.from_list([
-            {
-                "input_ids": torch.randint(0, 100, (10,)),
-                "attention_mask": torch.randint(0, 2, (10,)),
-                "label": torch.randint(0, 3, ()),
-            }
-            for _ in range(8)
-        ]),
+        Dataset.from_list(
+            [
+                {
+                    "input_ids": torch.randint(0, 100, (10,)),
+                    "attention_mask": torch.randint(0, 2, (10,)),
+                    "label": torch.randint(0, 3, ()),
+                }
+                for _ in range(8)
+            ]
+        ),
         collate_fn=DataCollatorWithPadding(tokenizer=bert_test_tokenizer),
         batch_size=4,
     )

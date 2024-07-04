@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-from typing import NamedTuple, Any, TYPE_CHECKING
 import sys
+from typing import TYPE_CHECKING, Any
 
-import torch
-import torch.nn as nn
-from transformers import PreTrainedModel, PreTrainedTokenizer
-from calflops import calculate_flops
 import tabulate
+import torch
+from calflops import calculate_flops
+from transformers import PreTrainedModel, PreTrainedTokenizer
+
 
 if TYPE_CHECKING:
-    from .importance import ComponentsInfo, ComponentsImportance
+    from .importance import ComponentsImportance, ComponentsInfo
 
 
 def count_flops_macs_params(
-        model: PreTrainedModel,
-        tokenizer: PreTrainedTokenizer,
-        batch_size: int = 1,
-        max_seq_length: int = 128,
-        *,
-        print_results: bool = True,
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    batch_size: int = 1,
+    max_seq_length: int = 128,
+    *,
+    print_results: bool = True,
 ) -> tuple[int, int, int]:
     max_seq_length = max_seq_length or tokenizer.model_max_length
 
@@ -37,7 +37,9 @@ def count_flops_macs_params(
     assert lib_params == params, f"Library params: {lib_params} != Custom params: {params}"
 
     if print_results:
-        print(f"FLOPs: {format_number(flops)}\tMACs: {format_number(macs)}\tParams: {format_number(params)} ({params}) \n")
+        print(
+            f"FLOPs: {format_number(flops)}\tMACs: {format_number(macs)}\tParams: {format_number(params)} ({params}) \n"
+        )
 
     return flops, macs, params
 
@@ -82,35 +84,33 @@ def measure_original_model_stats(model: PreTrainedModel, print_results: bool = F
     :return: dictionary with the number of parameters in the model and its layers
     """
     base_model = model.base_model if hasattr(model, "base_model") else model
-    assert 'llama' in base_model.config.model_type.lower(), f"Only llama models are supported, got {base_model.config.model_type}"
+    assert (
+        "llama" in base_model.config.model_type.lower()
+    ), f"Only llama models are supported, got {base_model.config.model_type}"
 
     model_stats = {
-        'total': count_total_parameters(model),
-        'base': count_total_parameters(base_model),
+        "total": count_total_parameters(model),
+        "base": count_total_parameters(base_model),
     }
     for i, layer in enumerate(base_model.layers):
-        model_stats[f'layer_{i}'] = count_total_parameters(layer)
+        model_stats[f"layer_{i}"] = count_total_parameters(layer)
         # attention heads
-        model_stats[f'layer_{i}/attn'] = count_total_parameters(layer.self_attn)
+        model_stats[f"layer_{i}/attn"] = count_total_parameters(layer.self_attn)
         # feedforward
-        model_stats[f'layer_{i}/ffn'] = count_total_parameters(layer.mlp)
+        model_stats[f"layer_{i}/ffn"] = count_total_parameters(layer.mlp)
 
     if print_results:
-        headers = ['Layer', '#Params']
-        rows = [
-            [
-                key.replace('layer_', ''),
-                format_number(value)
-            ]
-            for key, value in model_stats.items()
-        ]
-        print(tabulate.tabulate(rows, headers=headers, tablefmt='pretty', colalign=('left',)))
+        headers = ["Layer", "#Params"]
+        rows = [[key.replace("layer_", ""), format_number(value)] for key, value in model_stats.items()]
+        print(tabulate.tabulate(rows, headers=headers, tablefmt="pretty", colalign=("left",)))
         sys.stdout.flush()
 
     return model_stats
 
 
-def measure_pruned_model_stats(model: PreTrainedModel, original_model_stats: dict[str, Any] | None = None, print_results: bool = False) -> dict[str, Any]:
+def measure_pruned_model_stats(
+    model: PreTrainedModel, original_model_stats: dict[str, Any] | None = None, print_results: bool = False
+) -> dict[str, Any]:
     """
     Measure the number of parameters in the model and its layers.
     Also includes the number of parameters in the attention heads and feedforward layers.
@@ -122,70 +122,108 @@ def measure_pruned_model_stats(model: PreTrainedModel, original_model_stats: dic
     :return: dictionary with the number of parameters in the model and its layers
     """
     base_model = model.base_model if hasattr(model, "base_model") else model
-    assert 'llama' in base_model.config.model_type.lower(), f"Only llama models are supported, got {base_model.config.model_type}"
+    assert (
+        "llama" in base_model.config.model_type.lower()
+    ), f"Only llama models are supported, got {base_model.config.model_type}"
 
     # Check total sparsity
     sparsity_stats = {
-        'total': {
-            'num_original_parameters': original_model_stats['total'] if original_model_stats else None,
-            'num_parameters': count_total_parameters(model),
-            'num_zero_parameters': count_zero_parameters(model),
-            'num_nonzero_parameters': count_nonzero_parameters(model),
+        "total": {
+            "num_original_parameters": original_model_stats["total"] if original_model_stats else None,
+            "num_parameters": count_total_parameters(model),
+            "num_zero_parameters": count_zero_parameters(model),
+            "num_nonzero_parameters": count_nonzero_parameters(model),
         },
-        'base': {
-            'num_original_parameters': original_model_stats['base'] if original_model_stats else None,
-            'num_parameters': count_total_parameters(base_model),
-            'num_zero_parameters': count_zero_parameters(base_model),
-            'num_nonzero_parameters': count_nonzero_parameters(base_model),
+        "base": {
+            "num_original_parameters": original_model_stats["base"] if original_model_stats else None,
+            "num_parameters": count_total_parameters(base_model),
+            "num_zero_parameters": count_zero_parameters(base_model),
+            "num_nonzero_parameters": count_nonzero_parameters(base_model),
         },
     }
     # Check sparsity by layer (unstructured and structured)
     for i, layer in enumerate(base_model.layers):
-        sparsity_stats[f'layer_{i}'] = {
-            'num_original_parameters': original_model_stats[f'layer_{i}'] if original_model_stats else None,
-            'num_parameters': count_total_parameters(layer),
-            'num_zero_parameters': count_zero_parameters(layer),
-            'num_nonzero_parameters': count_nonzero_parameters(layer),
+        sparsity_stats[f"layer_{i}"] = {
+            "num_original_parameters": original_model_stats[f"layer_{i}"] if original_model_stats else None,
+            "num_parameters": count_total_parameters(layer),
+            "num_zero_parameters": count_zero_parameters(layer),
+            "num_nonzero_parameters": count_nonzero_parameters(layer),
         }
         # attention heads
-        sparsity_stats[f'layer_{i}/attn'] = {
-            'num_original_parameters': original_model_stats[f'layer_{i}/attn'] if original_model_stats else None,
-            'num_parameters': count_total_parameters(layer.self_attn),
-            'num_zero_parameters': count_zero_parameters(layer.self_attn),
-            'num_nonzero_parameters': count_nonzero_parameters(layer.self_attn),
+        sparsity_stats[f"layer_{i}/attn"] = {
+            "num_original_parameters": original_model_stats[f"layer_{i}/attn"] if original_model_stats else None,
+            "num_parameters": count_total_parameters(layer.self_attn),
+            "num_zero_parameters": count_zero_parameters(layer.self_attn),
+            "num_nonzero_parameters": count_nonzero_parameters(layer.self_attn),
         }
         # feedforward
-        sparsity_stats[f'layer_{i}/ffn'] = {
-            'num_original_parameters': original_model_stats[f'layer_{i}/ffn'] if original_model_stats else None,
-            'num_parameters': count_total_parameters(layer.mlp),
-            'num_zero_parameters': count_zero_parameters(layer.mlp),
-            'num_nonzero_parameters': count_nonzero_parameters(layer.mlp),
+        sparsity_stats[f"layer_{i}/ffn"] = {
+            "num_original_parameters": original_model_stats[f"layer_{i}/ffn"] if original_model_stats else None,
+            "num_parameters": count_total_parameters(layer.mlp),
+            "num_zero_parameters": count_zero_parameters(layer.mlp),
+            "num_nonzero_parameters": count_nonzero_parameters(layer.mlp),
         }
 
     # Add percentage columns
     for key, stats in sparsity_stats.items():
-        stats['percentage_original_pruned'] = (stats['num_original_parameters'] - stats['num_parameters']) / stats['num_original_parameters'] * 100 if stats['num_original_parameters'] else None
-        stats['percentage_original_zero'] = stats['num_zero_parameters'] / stats['num_original_parameters'] * 100 if stats['num_original_parameters'] else None
-        stats['percentage_original_pruned_or_zero'] = (stats['num_original_parameters'] - stats['num_parameters'] + stats['num_zero_parameters']) / stats['num_original_parameters'] * 100 if stats['num_original_parameters'] else None
-        stats['percentage_zero'] = stats['num_zero_parameters'] / stats['num_parameters'] * 100
+        stats["percentage_original_pruned"] = (
+            (stats["num_original_parameters"] - stats["num_parameters"]) / stats["num_original_parameters"] * 100
+            if stats["num_original_parameters"]
+            else None
+        )
+        stats["percentage_original_zero"] = (
+            stats["num_zero_parameters"] / stats["num_original_parameters"] * 100
+            if stats["num_original_parameters"]
+            else None
+        )
+        stats["percentage_original_pruned_or_zero"] = (
+            (stats["num_original_parameters"] - stats["num_parameters"] + stats["num_zero_parameters"])
+            / stats["num_original_parameters"]
+            * 100
+            if stats["num_original_parameters"]
+            else None
+        )
+        stats["percentage_zero"] = stats["num_zero_parameters"] / stats["num_parameters"] * 100
 
     if print_results:
-        headers = ['Layer', '#Params\n(Original)', '#Params\n(Pruned)', '#Params\n(Zero)', '#Params\n(Nonzero)', '%Pruned', '%Zero', '%Pruned or Zero', '%Zero\n(Current)']
+        headers = [
+            "Layer",
+            "#Params\n(Original)",
+            "#Params\n(Pruned)",
+            "#Params\n(Zero)",
+            "#Params\n(Nonzero)",
+            "%Pruned",
+            "%Zero",
+            "%Pruned or Zero",
+            "%Zero\n(Current)",
+        ]
         table = [
             [
-                '_' + fkey if '/' in (fkey := key.replace('layer_', '')) else fkey,
-                format_number(values['num_original_parameters']) if values['num_original_parameters'] is not None else '-',
-                format_number(values['num_parameters']),
-                format_number(values['num_zero_parameters']),
-                format_number(values['num_nonzero_parameters']),
-                f"{values['percentage_original_pruned']:.2f}%" if values['percentage_original_pruned'] is not None else '-',
-                f"{values['percentage_original_zero']:.2f}%" if values['percentage_original_zero'] is not None else '-',
-                f"{values['percentage_original_pruned_or_zero']:.2f}%" if values['percentage_original_pruned_or_zero'] is not None else '-',
+                "_" + fkey if "/" in (fkey := key.replace("layer_", "")) else fkey,
+                (
+                    format_number(values["num_original_parameters"])
+                    if values["num_original_parameters"] is not None
+                    else "-"
+                ),
+                format_number(values["num_parameters"]),
+                format_number(values["num_zero_parameters"]),
+                format_number(values["num_nonzero_parameters"]),
+                (
+                    f"{values['percentage_original_pruned']:.2f}%"
+                    if values["percentage_original_pruned"] is not None
+                    else "-"
+                ),
+                f"{values['percentage_original_zero']:.2f}%" if values["percentage_original_zero"] is not None else "-",
+                (
+                    f"{values['percentage_original_pruned_or_zero']:.2f}%"
+                    if values["percentage_original_pruned_or_zero"] is not None
+                    else "-"
+                ),
                 f"{values['percentage_zero']:.2f}%",
             ]
             for key, values in sparsity_stats.items()
         ]
-        print(tabulate.tabulate(table, headers=headers, tablefmt='pretty', colalign=('left',)))
+        print(tabulate.tabulate(table, headers=headers, tablefmt="pretty", colalign=("left",)))
         sys.stdout.flush()
 
     return sparsity_stats
@@ -198,48 +236,56 @@ def print_components_info_importance(components_info_importance: ComponentsInfo 
     headers = ["Layer", "Attn heads", "Attn layers", "FFN neurons", "FFN layers", "Hidden states"]
     table = []
     try:
-        table.append([
-            "total",
-            _print_value(components_info_importance.attention_heads_info),
-            _print_value(components_info_importance.attention_layers_info),
-            _print_value(components_info_importance.ffn_neurons_info),
-            _print_value(components_info_importance.ffn_layers_info),
-            _print_value(components_info_importance.hidden_states_info),
-        ])
+        table.append(
+            [
+                "total",
+                _print_value(components_info_importance.attention_heads_info),
+                _print_value(components_info_importance.attention_layers_info),
+                _print_value(components_info_importance.ffn_neurons_info),
+                _print_value(components_info_importance.ffn_layers_info),
+                _print_value(components_info_importance.hidden_states_info),
+            ]
+        )
         for layer in range(components_info_importance.attention_heads_info.size(1)):
-            table.append([
-                layer,
-                _print_value(components_info_importance.attention_heads_info[:, layer, :]),
-                _print_value(components_info_importance.attention_layers_info[:, layer]),
-                _print_value(components_info_importance.ffn_neurons_info[:, layer, :]),
-                _print_value(components_info_importance.ffn_layers_info[:, layer]),
-                '-',
-            ])
+            table.append(
+                [
+                    layer,
+                    _print_value(components_info_importance.attention_heads_info[:, layer, :]),
+                    _print_value(components_info_importance.attention_layers_info[:, layer]),
+                    _print_value(components_info_importance.ffn_neurons_info[:, layer, :]),
+                    _print_value(components_info_importance.ffn_layers_info[:, layer]),
+                    "-",
+                ]
+            )
         meta = components_info_importance.meta_info
     except AttributeError:
-        table.append([
-            "total",
-            _print_value(components_info_importance.attention_heads_importance),
-            _print_value(components_info_importance.attention_layers_importance),
-            _print_value(components_info_importance.ffn_neurons_importance),
-            _print_value(components_info_importance.ffn_layers_importance),
-            _print_value(components_info_importance.hidden_states_importance),
-        ])
-        for layer in range(components_info_importance.attention_heads_importance.size(0)):
-            table.append([
-                layer,
-                _print_value(components_info_importance.attention_heads_importance[layer, :]),
-                _print_value(components_info_importance.attention_layers_importance[layer]),
-                _print_value(components_info_importance.ffn_neurons_importance[layer, :]),
-                _print_value(components_info_importance.ffn_layers_importance[layer]),
+        table.append(
+            [
+                "total",
+                _print_value(components_info_importance.attention_heads_importance),
+                _print_value(components_info_importance.attention_layers_importance),
+                _print_value(components_info_importance.ffn_neurons_importance),
+                _print_value(components_info_importance.ffn_layers_importance),
                 _print_value(components_info_importance.hidden_states_importance),
-            ])
+            ]
+        )
+        for layer in range(components_info_importance.attention_heads_importance.size(0)):
+            table.append(
+                [
+                    layer,
+                    _print_value(components_info_importance.attention_heads_importance[layer, :]),
+                    _print_value(components_info_importance.attention_layers_importance[layer]),
+                    _print_value(components_info_importance.ffn_neurons_importance[layer, :]),
+                    _print_value(components_info_importance.ffn_layers_importance[layer]),
+                    _print_value(components_info_importance.hidden_states_importance),
+                ]
+            )
         meta = components_info_importance.meta_importance[None, :]
     print(tabulate.tabulate(table, headers=headers, tablefmt="pretty"))
     headers = ["Attn heads", "Attn layers", "FFN neurons", "FFN layers", "Hidden states"]
     table = [[f"{value.mean().item():.4f}" for value in meta.T]]
     print("Meta:")
-    print(tabulate.tabulate(table, headers=headers, tablefmt="pretty", colalign=('left',)))
+    print(tabulate.tabulate(table, headers=headers, tablefmt="pretty", colalign=("left",)))
     sys.stdout.flush()
 
 

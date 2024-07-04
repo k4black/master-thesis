@@ -4,20 +4,29 @@ import torch
 from transformers import PreTrainedModel
 
 from adaptive_pruning.injections import (
-    inject_attention_head_mask, inject_attention_layer_mask, inject_ffn_neuron_mask, inject_ffn_layer_mask
+    inject_attention_head_mask,
+    inject_attention_layer_mask,
+    inject_ffn_layer_mask,
+    inject_ffn_neuron_mask,
 )
 from adaptive_pruning.nullify import (
-    nullify_attention_heads, nullify_attention_layers, nullify_ffn_neurons, nullify_ffn_layers, nullify_hidden_state
+    nullify_attention_heads,
+    nullify_attention_layers,
+    nullify_ffn_layers,
+    nullify_ffn_neurons,
+    nullify_hidden_state,
 )
 
 
 class TestInjectAttentionHeadMask:
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             heads_to_mask = {0: [0]}
@@ -28,14 +37,18 @@ class TestInjectAttentionHeadMask:
             # nullify parts of the model
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_attention_heads(nullified_model, heads_to_mask)
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_attention_head_mask(test_lm_model, head_mask)
-            masked_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            masked_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the masked model is different from the original model
             assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
@@ -46,7 +59,9 @@ class TestInjectAttentionHeadMask:
             # remove mask via handles
             for handle in masking_handles:
                 handle.remove()
-            no_handles_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            no_handles_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the model with removed handles is the same as the original model
             assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
@@ -55,10 +70,12 @@ class TestInjectAttentionHeadMask:
 class TestInjectAttentionLayerMask:
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             layers_to_mask = [0]
@@ -69,14 +86,18 @@ class TestInjectAttentionLayerMask:
             # nullify parts of the model
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_attention_layers(nullified_model, layers_to_mask)
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_attention_layer_mask(test_lm_model, layer_mask)
-            masked_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            masked_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the masked model is different from the original model
             assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
@@ -87,7 +108,9 @@ class TestInjectAttentionLayerMask:
             # remove mask via handles
             for handle in masking_handles:
                 handle.remove()
-            no_handles_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            no_handles_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the model with removed handles is the same as the original model
             assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
@@ -96,10 +119,12 @@ class TestInjectAttentionLayerMask:
 class TestInjectFfnNeuronMask:
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             neurons_to_mask = {0: [0, 10, *range(50, 60), 127]}
@@ -110,14 +135,18 @@ class TestInjectFfnNeuronMask:
             # nullify parts of the model
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_ffn_neurons(nullified_model, neurons_to_mask)
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_ffn_neuron_mask(test_lm_model, neuron_mask)
-            masked_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            masked_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the masked model is different from the original model
             assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
@@ -128,7 +157,9 @@ class TestInjectFfnNeuronMask:
             # remove mask via handles
             for handle in masking_handles:
                 handle.remove()
-            no_handles_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            no_handles_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the model with removed handles is the same as the original model
             assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
@@ -137,10 +168,12 @@ class TestInjectFfnNeuronMask:
 class TestInjectFfnLayerMask:
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
-        
+
         with torch.no_grad():
             # get output of the original model
-            original_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            original_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # set params
             layers_to_mask = [0]
@@ -151,14 +184,18 @@ class TestInjectFfnLayerMask:
             # nullify parts of the model
             nullified_model = copy.deepcopy(test_lm_model)
             nullify_ffn_layers(nullified_model, layers_to_mask)
-            nullified_last_hidden_state = nullified_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            nullified_last_hidden_state = nullified_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the nullified model is different from the original model
             assert not torch.allclose(nullified_last_hidden_state, original_last_hidden_state)
 
             # mask parts of the model
             masking_handles = inject_ffn_layer_mask(test_lm_model, layer_mask)
-            masked_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            masked_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the masked model is different from the original model
             assert not torch.allclose(masked_last_hidden_state, original_last_hidden_state)
@@ -169,8 +206,9 @@ class TestInjectFfnLayerMask:
             # remove mask via handles
             for handle in masking_handles:
                 handle.remove()
-            no_handles_last_hidden_state = test_lm_model(random_input_batch["input_ids"], random_input_batch["attention_mask"])[0]
+            no_handles_last_hidden_state = test_lm_model(
+                random_input_batch["input_ids"], random_input_batch["attention_mask"]
+            )[0]
 
             # check the output of the model with removed handles is the same as the original model
             assert torch.allclose(no_handles_last_hidden_state, original_last_hidden_state)
-

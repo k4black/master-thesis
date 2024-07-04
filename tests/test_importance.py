@@ -6,25 +6,22 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedModel
 
 from adaptive_pruning.importance import (
-    ComponentsInfo,
     ComponentsImportance,
-    collect_mask_gradients,
+    ComponentsInfo,
     collect_activations,
-    collect_weight_magnitudes,
+    collect_mask_gradients,
     collect_random_numbers,
-    info_to_mean,
-    info_to_max,
-    info_to_fisher,
+    collect_weight_magnitudes,
     info_to_entropy,
+    info_to_fisher,
+    info_to_max,
+    info_to_mean,
 )
 
 
 @pytest.fixture
 def random_info() -> ComponentsInfo:
-    return ComponentsInfo(*[
-        torch.rand(10, 5)
-        for _ in range(6)
-    ])
+    return ComponentsInfo(*[torch.rand(10, 5) for _ in range(6)])
 
 
 class TestCollect:
@@ -38,7 +35,7 @@ class TestCollect:
         ],
     )
     def test_all_collectors_random_input(
-            self, collector: Callable, bert_clf_test_model: PreTrainedModel, random_dataloader: DataLoader
+        self, collector: Callable, bert_clf_test_model: PreTrainedModel, random_dataloader: DataLoader
     ) -> None:
         result = collector(bert_clf_test_model, random_dataloader)
         assert isinstance(result, ComponentsInfo)

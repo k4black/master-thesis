@@ -33,18 +33,18 @@ def _register_post_mask(module: nn.Module, mask: torch.Tensor, extra_mask: torch
 
 
 def inject_attention_head_mask(
-        model: PreTrainedModel,
-        head_mask: torch.Tensor,
-        extra_mask: torch.Tensor | None = None,
+    model: PreTrainedModel,
+    head_mask: torch.Tensor,
+    extra_mask: torch.Tensor | None = None,
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's attention heads such a way it emulates the effect of pruning.
 
-    The mask is applied to the input of the attention heads, effectively zeroing out the input to the masked heads.
+    The mask is applied to the input of the attention heads, zeroing out the input to the masked heads.
 
     For each layer:
         - self [hidden_size -> hidden_size]
-        > mask [num_attention_heads] (broadcasted to [hidden_size])
+        > mask [num_attention_heads] (broadcast to [hidden_size])
         - output [hidden_size -> hidden_size]
 
     :param model: The transformers pytorch model to inject the mask into
@@ -60,24 +60,30 @@ def inject_attention_head_mask(
             # head_mask of shape [num_attention_heads] extend to have shape of [num_attention_heads*attention_head_size]
             broadcast_head_mask = head_mask[layer].repeat_interleave(attention_head_size)
             removable_handles.append(
-                _register_post_mask(model.encoder.layer[layer].attention.self, broadcast_head_mask, extra_mask=extra_mask)
+                _register_post_mask(
+                    model.encoder.layer[layer].attention.self, broadcast_head_mask, extra_mask=extra_mask
+                )
             )
         elif architecture == "llama":
             num_key_value_heads = model.config.num_key_value_heads
-            num_heads_per_key_value_head = model.config.num_attention_heads // num_key_value_heads
             # head_mask of shape [num_attention_heads] shrink to have shape of [num_key_value_heads]
             grouped_head_mask = head_mask[layer].view(-1, num_key_value_heads).prod(dim=0)
             # head_mask of shape [num_attention_heads] extend to have shape of [num_attention_heads*attention_head_size]
-            # grouped_head_mask of shape [num_key_value_heads] extend to have shape of [num_key_value_heads*attention_head_size]
+            # grouped_head_mask of shape [num_key_value_heads] extend
+            #   to have shape of [num_key_value_heads*attention_head_size]
             broadcast_grouped_head_mask = grouped_head_mask.repeat_interleave(attention_head_size)
             # broadcast_head_mask = head_mask[layer].repeat_interleave(attention_head_size)
             assert broadcast_grouped_head_mask.shape == (model.config.num_key_value_heads * attention_head_size,)
             # assert broadcast_head_mask.shape == (model.config.num_attention_heads * attention_head_size,)
             removable_handles.append(
-                _register_post_mask(model.layers[layer].self_attn.k_proj, broadcast_grouped_head_mask, extra_mask=extra_mask)
+                _register_post_mask(
+                    model.layers[layer].self_attn.k_proj, broadcast_grouped_head_mask, extra_mask=extra_mask
+                )
             )
             removable_handles.append(
-                _register_post_mask(model.layers[layer].self_attn.v_proj, broadcast_grouped_head_mask, extra_mask=extra_mask)
+                _register_post_mask(
+                    model.layers[layer].self_attn.v_proj, broadcast_grouped_head_mask, extra_mask=extra_mask
+                )
             )
             # removable_handles.append(
             #     _register_pre_mask(model.layers[layer].self_attn.o_proj, broadcast_head_mask, extra_mask=extra_mask)
@@ -89,14 +95,14 @@ def inject_attention_head_mask(
 
 
 def inject_attention_layer_mask(
-        model: PreTrainedModel,
-        layer_mask: torch.Tensor,
-        extra_mask: torch.Tensor | None = None,
+    model: PreTrainedModel,
+    layer_mask: torch.Tensor,
+    extra_mask: torch.Tensor | None = None,
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's attention layers such a way it emulates the effect of pruning.
 
-    The mask is applied to the output of the attention layers, effectively zeroing out the output of the masked layers.
+    The mask is applied to the output of the attention layers, zeroing out the output of the masked layers.
 
     For each layer:
         - self [hidden_size -> hidden_size]
@@ -113,7 +119,9 @@ def inject_attention_layer_mask(
     for layer in range(model.config.num_hidden_layers):
         if architecture == "bert":
             removable_handles.append(
-                _register_post_mask(model.encoder.layer[layer].attention.output.dense, layer_mask[layer], extra_mask=extra_mask)
+                _register_post_mask(
+                    model.encoder.layer[layer].attention.output.dense, layer_mask[layer], extra_mask=extra_mask
+                )
             )
         elif architecture == "llama":
             removable_handles.append(
@@ -126,14 +134,14 @@ def inject_attention_layer_mask(
 
 
 def inject_ffn_neuron_mask(
-        model: PreTrainedModel,
-        neuron_mask: torch.Tensor,
-        extra_mask: torch.Tensor | None = None,
+    model: PreTrainedModel,
+    neuron_mask: torch.Tensor,
+    extra_mask: torch.Tensor | None = None,
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's feed forward neurons such a way it emulates the effect of pruning.
 
-    The mask is applied to the output of the feed forward neurons, effectively zeroing out the output of the masked neurons.
+    The mask is applied to the output of the feed forward neurons, zeroing out the output of the masked neurons.
 
     For each layer:
         - intermediate [hidden_size -> intermediate_size]
@@ -163,14 +171,14 @@ def inject_ffn_neuron_mask(
 
 
 def inject_ffn_layer_mask(
-        model: PreTrainedModel,
-        layer_mask: torch.Tensor,
-        extra_mask: torch.Tensor | None = None,
+    model: PreTrainedModel,
+    layer_mask: torch.Tensor,
+    extra_mask: torch.Tensor | None = None,
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's feed forward layers such a way it emulates the effect of pruning.
 
-    The mask is applied to the output of the feed forward layers, effectively zeroing out the output of the masked layers.
+    The mask is applied to the output of the feed forward layers, zeroing out the output of the masked layers.
 
     For each layer:
         - intermediate [hidden_size -> intermediate_size]
@@ -200,17 +208,17 @@ def inject_ffn_layer_mask(
 
 
 def inject_hidden_state_mask(
-        model: PreTrainedModel,
-        hidden_state_mask: torch.Tensor,
-        extra_mask: torch.Tensor | None = None,
+    model: PreTrainedModel,
+    hidden_state_mask: torch.Tensor,
+    extra_mask: torch.Tensor | None = None,
 ) -> list[RemovableHandle]:
     """
     Inject mask into the model's hidden states such a way it emulates the effect of pruning.
     All hidden_size are subject to the same mask, as we have residual connections.
 
-    The mask is applied to the hidden states, effectively zeroing out the hidden states of the masked layers.
+    The mask is applied to the hidden states, zeroing out the hidden states of the masked layers.
 
-    For each layer with hidden_size e.g. ffn, embeddings, encoder, etc:
+    For each layer with hidden_size e.g. ffn, embeddings, encoder, etc.:
         - output [hidden_size -> hidden_size]
         > mask [hidden_size]
         - output [hidden_size -> hidden_size]
@@ -225,17 +233,29 @@ def inject_hidden_state_mask(
     if architecture == "bert":
         # embeddings
         for name in ["word_embeddings", "position_embeddings", "token_type_embeddings"]:
-            removable_handles.append(_register_post_mask(model.embeddings.__getattr__(name), hidden_state_mask))
-            removable_handles.append(_register_pre_mask(model.embeddings.LayerNorm, hidden_state_mask))
+            removable_handles.append(
+                _register_post_mask(model.embeddings.__getattr__(name), hidden_state_mask, extra_mask=extra_mask)
+            )
+            removable_handles.append(
+                _register_pre_mask(model.embeddings.LayerNorm, hidden_state_mask, extra_mask=extra_mask)
+            )
 
         # encoder
         for layer in range(model.config.num_hidden_layers):
             # attentions
-            removable_handles.append(_register_pre_mask(model.encoder.layer[layer].attention.output, hidden_state_mask))
+            removable_handles.append(
+                _register_pre_mask(
+                    model.encoder.layer[layer].attention.output, hidden_state_mask, extra_mask=extra_mask
+                )
+            )
 
             # ffn
-            removable_handles.append(_register_pre_mask(model.encoder.layer[layer].intermediate, hidden_state_mask))
-            removable_handles.append(_register_post_mask(model.encoder.layer[layer].output, hidden_state_mask))
+            removable_handles.append(
+                _register_pre_mask(model.encoder.layer[layer].intermediate, hidden_state_mask, extra_mask=extra_mask)
+            )
+            removable_handles.append(
+                _register_post_mask(model.encoder.layer[layer].output, hidden_state_mask, extra_mask=extra_mask)
+            )
 
         # pooler
         removable_handles.append(_register_pre_mask(model.pooler, hidden_state_mask))
@@ -246,15 +266,20 @@ def inject_hidden_state_mask(
         # decoder
         for layer in range(model.config.num_hidden_layers):
             # attentions
-            removable_handles.append(_register_post_mask(model.layers[layer].input_layernorm, hidden_state_mask, extra_mask=extra_mask))
-            # removable_handles.append(_register_pre_mask(model.layers[layer].self_attn, hidden_state_mask, extra_mask=extra_mask))
-            removable_handles.append(_register_post_mask(model.layers[layer].self_attn, hidden_state_mask, extra_mask=extra_mask))
+            removable_handles.append(
+                _register_post_mask(model.layers[layer].input_layernorm, hidden_state_mask, extra_mask=extra_mask)
+            )
+            removable_handles.append(
+                _register_post_mask(model.layers[layer].self_attn, hidden_state_mask, extra_mask=extra_mask)
+            )
 
             # ffn
-            # removable_handles.append(_register_pre_mask(model.layers[layer].post_attention_layernorm, hidden_state_mask, extra_mask=extra_mask))
-            # removable_handles.append(_register_post_mask(model.layers[layer].post_attention_layernorm, hidden_state_mask, extra_mask=extra_mask))
-            removable_handles.append(_register_pre_mask(model.layers[layer].mlp, hidden_state_mask, extra_mask=extra_mask))
-            removable_handles.append(_register_post_mask(model.layers[layer].mlp, hidden_state_mask, extra_mask=extra_mask))
+            removable_handles.append(
+                _register_pre_mask(model.layers[layer].mlp, hidden_state_mask, extra_mask=extra_mask)
+            )
+            removable_handles.append(
+                _register_post_mask(model.layers[layer].mlp, hidden_state_mask, extra_mask=extra_mask)
+            )
 
         # norm
         removable_handles.append(_register_pre_mask(model.norm, hidden_state_mask, extra_mask=extra_mask))

@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-import gc
-import random
-from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
-import neptune
-import numpy as np
 import torch
 import typer
-from neptune.types import File
-from torch.utils.data import DataLoader
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from adaptive_pruning.utils import (
-    count_flops_macs_params,
-    count_total_parameters,
-    measure_original_model_stats,
-    measure_pruned_model_stats,
-    tensor_to_list,
-)
-from utils import create_neptune_run, evaluate_model, get_tokenized_dataset, save_model_tokenizer, set_random_seed
+from adaptive_pruning.utils import count_flops_macs_params, measure_original_model_stats, measure_pruned_model_stats
+from utils import create_neptune_run, evaluate_model, set_random_seed
 
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -44,12 +31,12 @@ def main(
         lib="original",
         pruning_ratio=0,
         pruning_components=[],
-        calibration_dataset='',
+        calibration_dataset="",
         calibration_batch_size=0,
         calibration_num_samples=0,
-        calibration_how_to_collect='',
-        calibration_how_to_average='',
-        calibration_how_to_overlap='',
+        calibration_how_to_collect="",
+        calibration_how_to_average="",
+        calibration_how_to_overlap="",
         save_model_as=None,
         extra_tags=[],
     )
@@ -71,6 +58,8 @@ def main(
     print(model)
 
     print("-" * 80)
+    pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
+    neptune_run["pruned_stats"] = pruned_model_stats
 
     # Log pruned model
     if evaluate_on:
@@ -79,7 +68,7 @@ def main(
             model=model,
             tokenizer=tokenizer,
             task_groups=evaluate_on,
-            device='cuda' if IS_CUDA_AVAILABLE else 'cpu',
+            device="cuda" if IS_CUDA_AVAILABLE else "cpu",
         )
         neptune_run["evaluation"] = eval_results
 

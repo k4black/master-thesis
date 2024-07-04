@@ -20,8 +20,8 @@ def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, 
             for name in ["query", "key", "value"]:
                 param = model.encoder.layer[layer].attention.self.__getattr__(name)
                 for head_index in heads:
-                    param.weight[head_index * head_size: (head_index + 1) * head_size] = 0
-                    param.bias[head_index * head_size: (head_index + 1) * head_size] = 0
+                    param.weight[head_index * head_size : (head_index + 1) * head_size] = 0
+                    param.bias[head_index * head_size : (head_index + 1) * head_size] = 0
 
     elif architecture == "llama":
         num_heads_per_group = model.config.num_attention_heads // model.config.num_key_value_heads
@@ -31,12 +31,14 @@ def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, 
             heads_not_grouped = [i * num_heads_per_group + j for i in heads_grouped for j in range(num_heads_per_group)]
             # q and out are full sized
             for head_index in heads_not_grouped:
-                model.layers[layer].self_attn.q_proj.weight[head_index * head_size: (head_index + 1) * head_size] = 0
-                model.layers[layer].self_attn.o_proj.weight[:, head_index * head_size: (head_index + 1) * head_size] = 0
+                model.layers[layer].self_attn.q_proj.weight[head_index * head_size : (head_index + 1) * head_size] = 0
+                model.layers[layer].self_attn.o_proj.weight[
+                    :, head_index * head_size : (head_index + 1) * head_size
+                ] = 0
             # k and v are grouped
             for head_index in heads_grouped:
-                model.layers[layer].self_attn.k_proj.weight[head_index * head_size: (head_index + 1) * head_size] = 0
-                model.layers[layer].self_attn.v_proj.weight[head_index * head_size: (head_index + 1) * head_size] = 0
+                model.layers[layer].self_attn.k_proj.weight[head_index * head_size : (head_index + 1) * head_size] = 0
+                model.layers[layer].self_attn.v_proj.weight[head_index * head_size : (head_index + 1) * head_size] = 0
     else:
         raise ValueError(f"Unsupported architecture: {architecture}")
 
@@ -176,4 +178,3 @@ def nullify_hidden_state(model: PreTrainedModel, neurons_to_nullify: list[int]) 
 
     for layer in model.encoder.layer:
         raise NotImplementedError()
-

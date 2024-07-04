@@ -3,23 +3,19 @@ from __future__ import annotations
 import gc
 import logging
 import random
-import time
 from pathlib import Path
 from typing import Any, NamedTuple
-from importlib.util import find_spec
 
-import neptune
 import lm_eval
 import lm_eval.models.huggingface
+import neptune
 import numpy as np
 import torch
-from datasets import load_dataset, Dataset
+from datasets import Dataset, load_dataset
 from lm_eval.utils import make_table
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from transformers import PreTrainedModel, PreTrainedTokenizer, BatchEncoding, DataCollatorForLanguageModeling
+from transformers import BatchEncoding, PreTrainedModel, PreTrainedTokenizer
 
-from adaptive_pruning.utils import format_number, count_flops_macs_params
+from adaptive_pruning.utils import count_flops_macs_params
 
 
 LM_EVAL_NAME_TO_TASKS = {
@@ -37,8 +33,8 @@ def set_random_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    
-    
+
+
 def create_neptune_run(
     base_model: str,
     lib: str,
@@ -60,18 +56,20 @@ def create_neptune_run(
     *,
     extra_tags: list[str] | None = None,
 ) -> neptune.Run:
-    neptune_run = neptune.init_run(tags=[
-        base_model,
-        *(extra_tags or []),
-    ])
-    
+    neptune_run = neptune.init_run(
+        tags=[
+            base_model,
+            *(extra_tags or []),
+        ]
+    )
+
     assert isinstance(pruning_components, list)
 
     neptune_run["parameters"] = {
         "base_model": base_model,
         "lib": "our",
         "pruning_ratio": pruning_ratio,
-        "pruning_components": '+'.join(pruning_components),
+        "pruning_components": "+".join(pruning_components),
         "calibration_dataset": calibration_dataset,
         "calibration_batch_size": calibration_batch_size,
         "calibration_num_samples": calibration_num_samples,
@@ -86,7 +84,7 @@ def create_neptune_run(
         # "finetuning_learning_rate": finetuning_learning_rate,
         # "finetuning_epochs": finetuning_epochs,
     }
-    
+
     return neptune_run
 
 
@@ -106,21 +104,23 @@ def get_tokenized_dataset(
         field = "text"
     else:
         raise NotImplementedError(f"Calibration dataset {name} is not supported.")
-        
-    dataset = load_dataset(**dataset_args, split=split, streaming=streaming and n_samples is not None, trust_remote_code=True)
+
+    dataset = load_dataset(
+        **dataset_args, split=split, streaming=streaming and n_samples is not None, trust_remote_code=True
+    )
     if n_samples:
         dataset = dataset.take(n_samples)
     if streaming:
         dataset = Dataset.from_list([{"text": ex[field]} for ex in dataset])
     if field != "text":
         dataset = dataset.rename_column(field, "text")
-        
+
     def _tokenize(examples: dict) -> BatchEncoding:
         return tokenizer(
-            examples['text'],
+            examples["text"],
             padding=True,
             truncation=True,
-            return_tensors='pt',
+            return_tensors="pt",
             # padding_side='left',
             max_length=seq_len or tokenizer.model_max_length,
         )
@@ -129,11 +129,11 @@ def get_tokenized_dataset(
         _tokenize,
         batched=True,
         load_from_cache_file=True,
-        remove_columns=['text'],
+        remove_columns=["text"],
     )
 
     return tokenized_dataset
-    
+
 
 def lm_eval_hf_model(
     model: PreTrainedModel,
@@ -155,7 +155,7 @@ def lm_eval_hf_model(
     else:
         dtype = torch.float32
     model = model.to(device, memory_format=torch.contiguous_format, dtype=dtype)
-    
+
     # get tasks list from name
     tasks = []
     for task_group_name in task_groups.split("+"):
@@ -168,7 +168,7 @@ def lm_eval_hf_model(
     # setup lm_eval logging level to ERROR
     logger = logging.getLogger("lm-eval")
     logger.setLevel(logging.ERROR)
-    
+
     # check if vllm is installed
     # if find_spec("vllm") is None:
 
@@ -180,10 +180,11 @@ def lm_eval_hf_model(
         device=device,
         batch_size=batch_size,
     )
-    
+
     # trust remote code for HF datasets, new version requires this to work
     # https://github.com/EleutherAI/lm-evaluation-harness/blob/d855d0baf8576296e790d0c9477b40a710d28e67/lm_eval/__main__.py#L358
     import datasets
+
     datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 
     results = lm_eval.simple_evaluate(
@@ -201,28 +202,28 @@ def lm_eval_hf_model(
         print(make_table(results))
 
     return results
-    
-    
+
+
 class InferenceResult(NamedTuple):
     time_average: float
     time_std: float
     n_samples: int
     time_per_sample_average: float
-    
-    
+
+
 def measure_inference_time(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     dataset: str,
-    split: str = 'test',
+    split: str = "test",
     n_samples: int | None = None,
-    device: str = 'auto',
+    device: str = "auto",
     repeat: int = 5,
 ) -> InferenceResult:
     # Resolve device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     # Update cache
     model = model.to("cpu")
     model.eval()
@@ -231,10 +232,10 @@ def measure_inference_time(
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
     gc.collect()
-    
+
     # Move model to device
     model = model.to(device=device, dtype=torch.float32, memory_format=torch.contiguous_format)
-    
+
     # Load dataset
     tokenized_dataset = get_tokenized_dataset(
         name=dataset,
@@ -243,11 +244,11 @@ def measure_inference_time(
         n_samples=n_samples,
         seq_len=None,
     )
-    
+
     # Init cuda events loggers
     start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    
-    # For each repetition 
+
+    # For each repetition
     timings_average, timings_std = [], []
     is_cuda_available = torch.cuda.is_available()
     model.eval()
@@ -260,7 +261,7 @@ def measure_inference_time(
                 _ = model(**inputs)
                 if is_cuda_available:
                     torch.cuda.synchronize()
-                
+
             # Measure inference time
             for i in range(len(tokenized_dataset)):
                 inputs = {k: v.to(device) for k, v in tokenized_dataset[i].items()}
@@ -271,10 +272,10 @@ def measure_inference_time(
                     torch.cuda.synchronize()
                 operation_time_s = start_time.elapsed_time(end_time) / 1000  # to seconds
                 repeat_timings.append(operation_time_s)
-            
+
             timings_average.append(np.mean(repeat_timings))
             timings_std.append(np.std(repeat_timings))
-    
+
     return InferenceResult(
         time_average=np.mean(timings_average),
         time_std=np.mean(timings_std),
@@ -313,29 +314,33 @@ def evaluate_model(
 
     # Evaluate the model with lm_eval
     lm_eval_results = lm_eval_hf_model(
-        model, 
-        tokenizer, 
-        task_groups=task_groups, 
-        batch_size=batch_size, 
-        device=device, 
-        dtype=dtype, 
+        model,
+        tokenizer,
+        task_groups=task_groups,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
         print_results=False,
     )
     batch_sizes = ",".join(map(str, lm_eval_results["config"]["batch_sizes"]))
     # print('lm_eval_results["results"]', lm_eval_results["results"])
     short_lm_eval_results = {
-        task: [v for k, v in task_results.items() if 'stderr' not in k and 'alias' not in k and ('acc' in k or 'f1' in k or 'word_perplexity' in k)][0]
+        task: [
+            v
+            for k, v in task_results.items()
+            if "stderr" not in k and "alias" not in k and ("acc" in k or "f1" in k or "word_perplexity" in k)
+        ][0]
         for task, task_results in lm_eval_results["results"].items()
     }
     # print('short_lm_eval_results', short_lm_eval_results)
 
     # Measure inference time
     inference_result: InferenceResult = measure_inference_time(
-        model=model, 
+        model=model,
         tokenizer=tokenizer,
-        dataset=inference_dataset, 
+        dataset=inference_dataset,
         split=inference_dataset_split,
-        device=device, 
+        device=device,
     )
 
     # Print the results
@@ -344,7 +349,10 @@ def evaluate_model(
     print(make_table(lm_eval_results))
     for task, result in short_lm_eval_results.items():
         print(f"{task:>10}: {result:.4f}")
-    print(f"Inference time: {inference_result.time_average:.2f}s ±{inference_result.time_std:.2f} for {inference_result.n_samples} samples")
+    print(
+        f"Inference time: {inference_result.time_average:.2f}s ±{inference_result.time_std:.2f} "
+        f"for {inference_result.n_samples} samples"
+    )
 
     return {
         # TODO: fix int32 overflow in neptune
@@ -363,33 +371,33 @@ def evaluate_model(
 def save_model_tokenizer(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, path: str | Path) -> None:
     model_path = Path(path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"Saving model to {model_path}...")
-    
+
     model.half()
     torch.save(
         {
-            'model': model,
-            'tokenizer': tokenizer,
-        }, 
+            "model": model,
+            "tokenizer": tokenizer,
+        },
         model_path,
     )
-    
+
 
 def load_model_tokenizer(path: str | Path) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     model_path = Path(path)
-    
+
     print(f"Loading model from {model_path}...")
-    
+
     checkpoint = torch.load(model_path)
-    model = checkpoint['model']
-    tokenizer = checkpoint['tokenizer']
-    
+    model = checkpoint["model"]
+    tokenizer = checkpoint["tokenizer"]
+
     model.eval()
     model.zero_grad()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
     gc.collect()
-    
-    return model
+
+    return model, tokenizer
