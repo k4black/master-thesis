@@ -4,10 +4,11 @@ from typing import Optional
 
 import torch
 import typer
+from neptune.types import File
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from adaptive_pruning.utils import count_flops_macs_params, measure_original_model_stats, measure_pruned_model_stats
-from utils import create_neptune_run, evaluate_model, set_random_seed
+from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
+from utils import create_neptune_run, evaluate_model, fix_neptune_overflow_recursively, set_random_seed
 
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -21,7 +22,7 @@ torch.backends.cudnn.benchmark = False
 def main(
     base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
     seed: int = 42,
-    evaluate_on: Optional[str] = "perplexity+full+toxicity",
+    evaluate_on: Optional[str] = "perplexity+full+bias",
 ) -> None:
     set_random_seed(seed)
 
@@ -29,7 +30,7 @@ def main(
     neptune_run = create_neptune_run(
         base_model=base_model,
         lib="original",
-        pruning_ratio=0,
+        pruning_ratio=0.0,
         pruning_components=[],
         calibration_dataset="",
         calibration_batch_size=0,
@@ -37,8 +38,8 @@ def main(
         calibration_how_to_collect="",
         calibration_how_to_average="",
         calibration_how_to_overlap="",
-        save_model_as=None,
-        extra_tags=[],
+        save_model_as="",
+        extra_tags=["original"],
     )
 
     # Load the finetuned model and the corresponding tokenizer
@@ -52,14 +53,15 @@ def main(
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     print(f"Original Model: {base_model} loaded")
     count_flops_macs_params(model, tokenizer, print_results=True)
-    original_model_stats = measure_original_model_stats(model, print_results=False)
+    original_model_stats = measure_model_stats(model, print_results=False)
 
     # print model with sample input
     print(model)
 
     print("-" * 80)
-    pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
-    neptune_run["pruned_stats"] = pruned_model_stats
+    pruned_model_stats = measure_model_stats(model, original_model_stats, print_results=True)
+    neptune_run["pruning/stats"].upload(File.as_pickle(pruned_model_stats))
+    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
 
     # Log pruned model
     if evaluate_on:

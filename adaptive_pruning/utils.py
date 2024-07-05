@@ -20,7 +20,7 @@ def count_flops_macs_params(
     max_seq_length: int = 128,
     *,
     print_results: bool = True,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     max_seq_length = max_seq_length or tokenizer.model_max_length
 
     flops, macs, lib_params = calculate_flops(
@@ -34,14 +34,18 @@ def count_flops_macs_params(
         output_precision=4,
     )
     params = count_total_parameters(model, require_grad=None)
+    zero_params = count_zero_parameters(model, require_grad=None)
     assert lib_params == params, f"Library params: {lib_params} != Custom params: {params}"
 
     if print_results:
         print(
-            f"FLOPs: {format_number(flops)}\tMACs: {format_number(macs)}\tParams: {format_number(params)} ({params}) \n"
+            f"FLOPs: {format_number(flops)}\t"
+            f"MACs: {format_number(macs)}\t"
+            f"Params: {format_number(params)} ({params})\t"
+            f"Zero params: {format_number(zero_params)} ({zero_params/params*100:.2f}%)"
         )
 
-    return flops, macs, params
+    return flops, macs, params, zero_params
 
 
 def count_zero_parameters(
@@ -74,152 +78,61 @@ def count_total_parameters(
         return sum(p.numel() for p in module.parameters() if p.requires_grad == require_grad)
 
 
-def measure_original_model_stats(model: PreTrainedModel, print_results: bool = False) -> dict[str, Any]:
-    """
-    Measure the number of parameters in the model and its layers.
-    Also includes the number of parameters in the attention heads and feedforward layers.
-
-    :param model: model to measure, only llama models are supported
-    :param print_results: whether to print the results
-    :return: dictionary with the number of parameters in the model and its layers
-    """
-    base_model = model.base_model if hasattr(model, "base_model") else model
-    assert (
-        "llama" in base_model.config.model_type.lower()
-    ), f"Only llama models are supported, got {base_model.config.model_type}"
-
-    model_stats = {
-        "total": count_total_parameters(model),
-        "base": count_total_parameters(base_model),
-    }
-    for i, layer in enumerate(base_model.layers):
-        model_stats[f"layer_{i}"] = count_total_parameters(layer)
-        # attention heads
-        model_stats[f"layer_{i}/attn"] = count_total_parameters(layer.self_attn)
-        # feedforward
-        model_stats[f"layer_{i}/ffn"] = count_total_parameters(layer.mlp)
-
-    if print_results:
-        headers = ["Layer", "#Params"]
-        rows = [[key.replace("layer_", ""), format_number(value)] for key, value in model_stats.items()]
-        print(tabulate.tabulate(rows, headers=headers, tablefmt="pretty", colalign=("left",)))
-        sys.stdout.flush()
-
-    return model_stats
-
-
-def measure_pruned_model_stats(
+def measure_model_stats(
     model: PreTrainedModel, original_model_stats: dict[str, Any] | None = None, print_results: bool = False
 ) -> dict[str, Any]:
     """
     Measure the number of parameters in the model and its layers.
-    Also includes the number of parameters in the attention heads and feedforward layers.
-    Calculates stats with respect to the original model stats if provided.
-
-    :param model: model to measure, only llama models are supported
-    :param original_model_stats: original model stats to compare with
+    Collect pruned
+    When original_model_stats are provided, calculate the difference in the number of parameters.
+    This func can be use_d to measure both original model and then pruned model stats.
+    :param model: LLAMA Model to measure
+    :param original_model_stats: optional original model stats to compare with
     :param print_results: whether to print the results
-    :return: dictionary with the number of parameters in the model and its layers
+    :return: dict of the keys of ['total', 0, 1, ..., num_layers]. Each key contains the dict for the layer stats:
+        ['n_params', 'n_zero_params', 'attn_heads_n_params', 'attn_heads_n_zero_params', 'ffn_n_params', 'ffn_n_zero_params']
+        if original_model_stats are provided, the dict will also contain the 'X_pruned_percentage' keys
     """
     base_model = model.base_model if hasattr(model, "base_model") else model
     assert (
         "llama" in base_model.config.model_type.lower()
     ), f"Only llama models are supported, got {base_model.config.model_type}"
 
-    # Check total sparsity
-    sparsity_stats = {
-        "total": {
-            "num_original_parameters": original_model_stats["total"] if original_model_stats else None,
-            "num_parameters": count_total_parameters(model),
-            "num_zero_parameters": count_zero_parameters(model),
-            "num_nonzero_parameters": count_nonzero_parameters(model),
-        },
-        "base": {
-            "num_original_parameters": original_model_stats["base"] if original_model_stats else None,
-            "num_parameters": count_total_parameters(base_model),
-            "num_zero_parameters": count_zero_parameters(base_model),
-            "num_nonzero_parameters": count_nonzero_parameters(base_model),
-        },
-    }
     # Check sparsity by layer (unstructured and structured)
+    sparsity_stats = {}
     for i, layer in enumerate(base_model.layers):
-        sparsity_stats[f"layer_{i}"] = {
-            "num_original_parameters": original_model_stats[f"layer_{i}"] if original_model_stats else None,
-            "num_parameters": count_total_parameters(layer),
-            "num_zero_parameters": count_zero_parameters(layer),
-            "num_nonzero_parameters": count_nonzero_parameters(layer),
+        sparsity_stats[i] = {
+            "n_params": count_total_parameters(layer),
+            "n_zero_params": count_zero_parameters(layer),
+            "attn_heads_n_params": count_total_parameters(layer.self_attn),
+            "attn_heads_n_zero_params": count_zero_parameters(layer.self_attn),
+            "ffn_n_params": count_total_parameters(layer.mlp),
+            "ffn_n_zero_params": count_zero_parameters(layer.mlp),
         }
-        # attention heads
-        sparsity_stats[f"layer_{i}/attn"] = {
-            "num_original_parameters": original_model_stats[f"layer_{i}/attn"] if original_model_stats else None,
-            "num_parameters": count_total_parameters(layer.self_attn),
-            "num_zero_parameters": count_zero_parameters(layer.self_attn),
-            "num_nonzero_parameters": count_nonzero_parameters(layer.self_attn),
-        }
-        # feedforward
-        sparsity_stats[f"layer_{i}/ffn"] = {
-            "num_original_parameters": original_model_stats[f"layer_{i}/ffn"] if original_model_stats else None,
-            "num_parameters": count_total_parameters(layer.mlp),
-            "num_zero_parameters": count_zero_parameters(layer.mlp),
-            "num_nonzero_parameters": count_nonzero_parameters(layer.mlp),
-        }
-
-    # Add percentage columns
-    for key, stats in sparsity_stats.items():
-        stats["percentage_original_pruned"] = (
-            (stats["num_original_parameters"] - stats["num_parameters"]) / stats["num_original_parameters"] * 100
-            if stats["num_original_parameters"]
-            else None
-        )
-        stats["percentage_original_zero"] = (
-            stats["num_zero_parameters"] / stats["num_original_parameters"] * 100
-            if stats["num_original_parameters"]
-            else None
-        )
-        stats["percentage_original_pruned_or_zero"] = (
-            (stats["num_original_parameters"] - stats["num_parameters"] + stats["num_zero_parameters"])
-            / stats["num_original_parameters"]
-            * 100
-            if stats["num_original_parameters"]
-            else None
-        )
-        stats["percentage_zero"] = stats["num_zero_parameters"] / stats["num_parameters"] * 100
+    # Check total sparsity
+    sparsity_stats["total"] = {
+        "n_params": count_total_parameters(model),
+        "n_zero_params": count_zero_parameters(model),
+        "attn_heads_n_params": sum(sparsity_stats[i]["attn_heads_n_params"] for i in sparsity_stats),
+        "attn_heads_n_zero_params": sum(sparsity_stats[i]["attn_heads_n_zero_params"] for i in sparsity_stats),
+        "ffn_n_params": sum(sparsity_stats[i]["ffn_n_params"] for i in sparsity_stats),
+        "ffn_n_zero_params": sum(sparsity_stats[i]["ffn_n_zero_params"] for i in sparsity_stats),
+    }
 
     if print_results:
-        headers = [
-            "Layer",
-            "#Params\n(Original)",
-            "#Params\n(Pruned)",
-            "#Params\n(Zero)",
-            "#Params\n(Nonzero)",
-            "%Pruned",
-            "%Zero",
-            "%Pruned or Zero",
-            "%Zero\n(Current)",
-        ]
+        headers = ["Layer", "#Total\nParams", "#Total\n%Zero", "#Total\n%Pruned", "#Attn-Heads\nParams", "#Attn-Heads\n%Zero", "#Attn Heads\n%Pruned", "#FFN\nParams", "#FFN\n%Zero", "#FFN\n%Pruned"]
         table = [
             [
-                "_" + fkey if "/" in (fkey := key.replace("layer_", "")) else fkey,
-                (
-                    format_number(values["num_original_parameters"])
-                    if values["num_original_parameters"] is not None
-                    else "-"
-                ),
-                format_number(values["num_parameters"]),
-                format_number(values["num_zero_parameters"]),
-                format_number(values["num_nonzero_parameters"]),
-                (
-                    f"{values['percentage_original_pruned']:.2f}%"
-                    if values["percentage_original_pruned"] is not None
-                    else "-"
-                ),
-                f"{values['percentage_original_zero']:.2f}%" if values["percentage_original_zero"] is not None else "-",
-                (
-                    f"{values['percentage_original_pruned_or_zero']:.2f}%"
-                    if values["percentage_original_pruned_or_zero"] is not None
-                    else "-"
-                ),
-                f"{values['percentage_zero']:.2f}%",
+                key,
+                format_number(values["n_params"]),
+                f"{values['n_zero_params']/values['n_params']*100:.2f}%",
+                f"{(original_model_stats[key]['n_params']-values['n_params'])/original_model_stats[key]['n_params']*100:.2f}%" if original_model_stats else "-",
+                format_number(values["attn_heads_n_params"]),
+                f"{values['attn_heads_n_zero_params']/values['attn_heads_n_params']*100:.2f}%",
+                f"{(original_model_stats[key]['attn_heads_n_params']-values['attn_heads_n_params'])/original_model_stats[key]['attn_heads_n_params']*100:.2f}%" if original_model_stats else "-",
+                format_number(values["ffn_n_params"]),
+                f"{values['ffn_n_zero_params']/values['ffn_n_params']*100:.2f}%",
+                f"{(original_model_stats[key]['ffn_n_params']-values['ffn_n_params'])/original_model_stats[key]['ffn_n_params']*100:.2f}%" if original_model_stats else "-",
             ]
             for key, values in sparsity_stats.items()
         ]

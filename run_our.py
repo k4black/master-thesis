@@ -32,12 +32,18 @@ from adaptive_pruning.pruning import (
 )
 from adaptive_pruning.utils import (
     count_flops_macs_params,
-    measure_original_model_stats,
-    measure_pruned_model_stats,
+    measure_model_stats,
     print_components_info_importance,
     tensor_to_list,
 )
-from utils import create_neptune_run, evaluate_model, get_tokenized_dataset, save_model_tokenizer, set_random_seed
+from utils import (
+    create_neptune_run,
+    evaluate_model,
+    fix_neptune_overflow_recursively,
+    get_tokenized_dataset,
+    save_model_tokenizer,
+    set_random_seed,
+)
 
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -59,7 +65,7 @@ def main(
     pruning_ratio: float = 0.5,
     num_samples: int = 256,
     seed: int = 42,
-    evaluate_on: Optional[str] = "perplexity+full+toxicity",
+    evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
 ) -> None:
     set_random_seed(seed)
@@ -90,7 +96,7 @@ def main(
         calibration_how_to_average=how_to_average,
         calibration_how_to_overlap=how_to_overlap,
         save_model_as=save_model_as,
-        extra_tags=[],
+        extra_tags=["our"],
     )
 
     # Load the finetuned model and the corresponding tokenizer
@@ -104,7 +110,7 @@ def main(
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     print(f"Original Model: {base_model} loaded")
     count_flops_macs_params(model, tokenizer, print_results=True)
-    original_model_stats = measure_original_model_stats(model, print_results=False)
+    original_model_stats = measure_model_stats(model, print_results=False)
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
@@ -158,9 +164,9 @@ def main(
 
     # Log info and importance
     for name, value in components_info._asdict().items():
-        neptune_run[f"info/{name}"].upload(File.as_pickle(tensor_to_list(value)))
+        neptune_run[f"pruning/{name}"].upload(File.as_pickle(tensor_to_list(value)))
     for name, value in components_importance._asdict().items():
-        neptune_run[f"info/{name}"].upload(File.as_pickle(tensor_to_list(value)))
+        neptune_run[f"pruning/{name}"].upload(File.as_pickle(tensor_to_list(value)))
 
     # Print average importance
     print(f"Average importance for {how_to_collect}/{how_to_average}/{how_to_overlap}:")
@@ -423,8 +429,9 @@ def main(
         )
 
     print("-" * 80)
-    pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
-    neptune_run["pruned_stats"] = pruned_model_stats
+    pruned_model_stats = measure_model_stats(model, original_model_stats, print_results=True)
+    neptune_run["pruning/stats"].upload(File.as_pickle(pruned_model_stats))
+    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as)

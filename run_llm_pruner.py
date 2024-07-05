@@ -6,9 +6,10 @@ from typing import Optional
 
 import torch
 import typer
+from neptune.types import File
 from transformers import LlamaTokenizer
 
-from adaptive_pruning.utils import measure_original_model_stats, measure_pruned_model_stats
+from adaptive_pruning.utils import measure_model_stats
 
 
 # from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
@@ -30,7 +31,13 @@ else:
     from LLMPruner.datasets.example_samples import get_examples
     from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
-from utils import create_neptune_run, evaluate_model, save_model_tokenizer, set_random_seed
+from utils import (
+    create_neptune_run,
+    evaluate_model,
+    fix_neptune_overflow_recursively,
+    save_model_tokenizer,
+    set_random_seed,
+)
 
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -60,9 +67,9 @@ def main(
     global_pruning: bool = False,
     num_examples: int = 10,  # number of examples to use for calibration
     seed: int = 42,
-    evaluate_on: Optional[str] = "perplexity+full+toxicity",
+    evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
-):
+) -> None:
     set_random_seed(seed)
 
     if block_wise:
@@ -85,7 +92,7 @@ def main(
         calibration_num_samples=num_examples,
         calibration_how_to_collect=pruner_type,
         calibration_how_to_average=taylor,
-        calibration_how_to_overlap="none",
+        calibration_how_to_overlap="",
         save_model_as=save_model_as,
         extra_tags=["baseline"],
     )
@@ -102,7 +109,7 @@ def main(
 
     for param in model.parameters():
         param.requires_grad_(True)
-    original_model_stats = measure_original_model_stats(model, print_results=False)
+    original_model_stats = measure_model_stats(model, print_results=False)
     before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # Only for building the dependency graph.
@@ -266,8 +273,9 @@ def main(
     )
 
     print("-" * 80)
-    pruned_model_stats = measure_pruned_model_stats(model, original_model_stats, print_results=True)
-    neptune_run["pruned_stats"] = pruned_model_stats
+    pruned_model_stats = measure_model_stats(model, original_model_stats, print_results=True)
+    neptune_run["pruning/stats"].upload(File.as_pickle(pruned_model_stats))
+    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as)

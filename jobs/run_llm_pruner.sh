@@ -9,27 +9,21 @@ export $(cat .env | xargs)
 base_model_name='huggyllama/llama-7b'
 save_as='llm-pruner-llama-7b-pruned'
 
-pruning_rations="0.1 0.2 0.3 0.4 0.5"
-pruning_rations="0.025 0.05 0.1 0.2 0.3"
-#how_to_prune="random l1 taylor"
-how_to_prune="taylor"
+pruning_rations="0.05 0.1 0.2 0.3 0.4 0.5"
 
 
-for how_to in $how_to_prune; do
-  for pruning_ratio in $pruning_rations; do
-      echo "-->>> >>> Pruning Ratio: $pruning_ratio <<< <<<--"
+for pruning_ratio in $pruning_rations; do
+    echo "-->>> >>> Pruning Ratio: $pruning_ratio <<< <<<--"
 
-      echo "[START] - Start Pruning Model ($pruning_ratio)"
-      python run_llm_pruner.py \
-          --base_model=$base_model_name \
-          --pruning_ratio $pruning_ratio \
-          --channel_wise \
-          --save_ckpt_log_name $prune_ckpt_path \
-          --pruner_type $how_to \
-          --evaluate_on="perplexity+full+toxicity"
-  #        --block_wise \
-  #        --channel_wise \
-      #    --save_model
-      echo "[END] - Finish Pruning Model ($pruning_ratio)"
-  done
+    echo "[START] - Start Pruning Model ($pruning_ratio)"
+    python run_llm_pruner.py \
+        --base-model=$base_model_name \
+        --pruning-ratio $pruning_ratio \
+        --block-wise \
+        --pruner-type "taylor" \
+        --evaluate-on="perplexity+full+bias"
+#        --block-wise \
+#        --channel-wise \
+    #    --save-model-as TBA
+    echo "[END] - Finish Pruning Model ($pruning_ratio)"
 done

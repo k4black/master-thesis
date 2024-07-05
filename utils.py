@@ -13,17 +13,31 @@ import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 from lm_eval.utils import make_table
-from transformers import BatchEncoding, PreTrainedModel, PreTrainedTokenizer
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import BatchEncoding, PreTrainedModel, PreTrainedTokenizer, DataCollatorWithPadding
 
 from adaptive_pruning.utils import count_flops_macs_params
 
 
 LM_EVAL_NAME_TO_TASKS = {
-    "perplexity": ["wikitext"],
+    "perplexity": ["wikitext", "pile_10k"],
     "short": ["piqa", "boolq", "arc_easy"],
     "full": ["piqa", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"],
-    "gen": ["GSM8ka"],
-    "toxicity": ["crows_pairs_english"],
+    "extra": ["gsm8k", "gsm8k_cot", "toxigen", "truthfulqa_mc1"],  # "gsm8k_cot" and "toxigen" to long?
+    "bias": [
+        "crows_pairs_english",
+        "crows_pairs_english_age",
+        "crows_pairs_english_autre",
+        "crows_pairs_english_disability",
+        "crows_pairs_english_gender",
+        "crows_pairs_english_nationality",
+        "crows_pairs_english_physical_appearance",
+        "crows_pairs_english_race_color",
+        "crows_pairs_english_religion",
+        "crows_pairs_english_sexual_orientation",
+        "crows_pairs_english_socioeconomic",
+    ],
 }
 # TODO: add crows_pairs (crows_pairs_english),realtoxicityprompts,toxigen,truthfulqa,model_written_evals
 
@@ -63,13 +77,21 @@ def create_neptune_run(
         ]
     )
 
+    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'
+    device_gpu_memory = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
+    device_gpu_memory_gb = device_gpu_memory / 1024 ** 3
+
     assert isinstance(pruning_components, list)
+
+    neptune_run["monitoring/device"] = device_name
+    neptune_run["monitoring/device_memory"] = fix_neptune_overflow_recursively(device_gpu_memory)
+    neptune_run["monitoring/device_memory_gb"] = device_gpu_memory_gb
 
     neptune_run["parameters"] = {
         "base_model": base_model,
-        "lib": "our",
+        "lib": lib,
         "pruning_ratio": pruning_ratio,
-        "pruning_components": "+".join(pruning_components),
+        "pruning_components": "+".join(pruning_components) if pruning_components else "",
         "calibration_dataset": calibration_dataset,
         "calibration_batch_size": calibration_batch_size,
         "calibration_num_samples": calibration_num_samples,
@@ -95,6 +117,7 @@ def get_tokenized_dataset(
     n_samples: int | None = None,
     seq_len: int | None = None,
     streaming: bool = True,
+    padding: str | bool = 'longest',
 ) -> Dataset:
     if name == "bookcorpus":
         dataset_args = dict(path="bookcorpus")
@@ -115,12 +138,15 @@ def get_tokenized_dataset(
     if field != "text":
         dataset = dataset.rename_column(field, "text")
 
+    MAX_INT_32 = 2147483647
+    tokenizer.model_max_length = min(MAX_INT_32, tokenizer.model_max_length)
+
     def _tokenize(examples: dict) -> BatchEncoding:
         return tokenizer(
             examples["text"],
-            padding=True,
+            padding=padding,
             truncation=True,
-            return_tensors="pt",
+            # return_tensors="pt",
             # padding_side='left',
             max_length=seq_len or tokenizer.model_max_length,
         )
@@ -131,6 +157,8 @@ def get_tokenized_dataset(
         load_from_cache_file=True,
         remove_columns=["text"],
     )
+    # pt_columns = ["input_ids", "token_type_ids", "attention_mask", "label"]
+    # tokenized_dataset.set_format(type="torch", columns=[i for i in pt_columns if i in tokenized_dataset.column_names])
 
     return tokenized_dataset
 
@@ -220,6 +248,7 @@ def measure_inference_time(
     device: str = "auto",
     repeat: int = 5,
 ) -> InferenceResult:
+    print(f"Measure inference time on {dataset}/{split} select {n_samples}")
     # Resolve device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -229,12 +258,12 @@ def measure_inference_time(
     model.eval()
     model.zero_grad()
     if torch.cuda.is_available():
-        torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     gc.collect()
 
     # Move model to device
-    model = model.to(device=device, dtype=torch.float32, memory_format=torch.contiguous_format)
+    model = model.to(device=device, dtype=torch.float16, memory_format=torch.contiguous_format)
 
     # Load dataset
     tokenized_dataset = get_tokenized_dataset(
@@ -243,44 +272,60 @@ def measure_inference_time(
         tokenizer=tokenizer,
         n_samples=n_samples,
         seq_len=None,
+        padding=False,
     )
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding='longest', return_tensors="pt")
+    tokenized_dataloader = DataLoader(
+        tokenized_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=1,
+        drop_last=False,
+        collate_fn=data_collator,
+    )
+    # print('sample dataset', tokenized_dataset[0])
+    # for i in tokenized_dataloader:
+    #     print('sample dataloader', i)
+    #     break
 
     # Init cuda events loggers
     start_time, end_time = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
     # For each repetition
-    timings_average, timings_std = [], []
+    timings_history = []
     is_cuda_available = torch.cuda.is_available()
     model.eval()
     with torch.no_grad():
-        for _ in range(repeat):
+        for _ in tqdm(range(repeat), desc="repetitions"):
             repeat_timings = []
             # Warm-up GPU
-            for i in range(32):
-                inputs = {k: v.to(device) for k, v in tokenized_dataset[i].items()}
-                _ = model(**inputs)
+            for i, batch in enumerate(tokenized_dataloader):
+                if i > 32:
+                    break
+                batch = {k: v.to(model.device) for k, v in batch.items()}
+
+                _ = model(**batch)
                 if is_cuda_available:
                     torch.cuda.synchronize()
 
             # Measure inference time
-            for i in range(len(tokenized_dataset)):
-                inputs = {k: v.to(device) for k, v in tokenized_dataset[i].items()}
+            for i, batch in enumerate(tokenized_dataloader):
+                batch = {k: v.to(model.device) for k, v in batch.items()}
                 start_time.record()
-                _ = model(**inputs)
+                _ = model(**batch)
                 end_time.record()
                 if is_cuda_available:
                     torch.cuda.synchronize()
                 operation_time_s = start_time.elapsed_time(end_time) / 1000  # to seconds
                 repeat_timings.append(operation_time_s)
 
-            timings_average.append(np.mean(repeat_timings))
-            timings_std.append(np.std(repeat_timings))
+            timings_history.append(np.sum(repeat_timings))  # sum for all dataset
 
     return InferenceResult(
-        time_average=np.mean(timings_average),
-        time_std=np.mean(timings_std),
+        time_average=np.mean(timings_history),  # mean across repeats
+        time_std=np.std(timings_history),  # std across repeats
         n_samples=len(tokenized_dataset),
-        time_per_sample_average=np.mean(timings_average) / len(tokenized_dataset),
+        time_per_sample_average=np.mean(timings_history) / len(tokenized_dataset),
     )
 
 
@@ -300,8 +345,8 @@ def evaluate_model(
     model.eval()
     model.zero_grad()
     if torch.cuda.is_available():
-        torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     gc.collect()
 
     # TODO: ? save model to tmp file, then reload it
@@ -320,19 +365,25 @@ def evaluate_model(
         batch_size=batch_size,
         device=device,
         dtype=dtype,
-        print_results=False,
+        print_results=True,
     )
     batch_sizes = ",".join(map(str, lm_eval_results["config"]["batch_sizes"]))
-    # print('lm_eval_results["results"]', lm_eval_results["results"])
+    for task, task_results in lm_eval_results["results"].items():
+        print(f"{task}: {task_results}")
     short_lm_eval_results = {
         task: [
             v
             for k, v in task_results.items()
-            if "stderr" not in k and "alias" not in k and ("acc" in k or "f1" in k or "word_perplexity" in k)
+            if "stderr" not in k
+            and "alias" not in k
+            and ("acc," in k or "f1," in k or "word_perplexity," in k or "pct_stereotype," in k or "exact_match," in k)
         ][0]
         for task, task_results in lm_eval_results["results"].items()
     }
-    # print('short_lm_eval_results', short_lm_eval_results)
+    print('short_lm_eval_results', short_lm_eval_results)
+    # add average across all present tasks in short and full LM_EVAL_NAME_TO_TASKS (None if some task is missing)
+    short_lm_eval_results['short_average'] = np.mean([short_lm_eval_results.get(task, np.nan) for task in LM_EVAL_NAME_TO_TASKS['short']])
+    short_lm_eval_results['full_average'] = np.mean([short_lm_eval_results.get(task, np.nan) for task in LM_EVAL_NAME_TO_TASKS['full']])
 
     # Measure inference time
     inference_result: InferenceResult = measure_inference_time(
@@ -341,17 +392,18 @@ def evaluate_model(
         dataset=inference_dataset,
         split=inference_dataset_split,
         device=device,
+        repeat=5,
     )
 
     # Print the results
     print(f">> {batch_size=} ({batch_sizes}), {device=}, {dtype=}")
-    flops, macs, params = count_flops_macs_params(model, tokenizer, print_results=True)
+    flops, macs, params, zero_params = count_flops_macs_params(model, tokenizer, print_results=True)
     print(make_table(lm_eval_results))
     for task, result in short_lm_eval_results.items():
         print(f"{task:>10}: {result:.4f}")
     print(
         f"Inference time: {inference_result.time_average:.2f}s ±{inference_result.time_std:.2f} "
-        f"for {inference_result.n_samples} samples"
+        f"on {inference_result.n_samples} samples ({5} repetitions)"
     )
 
     return {
@@ -359,6 +411,8 @@ def evaluate_model(
         "flops": float(flops),
         "macs": float(macs),
         "params": float(params),
+        "zero_params": float(zero_params),
+        "zero_params_percent": zero_params / params * 100,
         "inference_dataset": inference_dataset + "/" + inference_dataset_split,
         "inference_time_average": inference_result.time_average,
         "inference_time_std": inference_result.time_std,
@@ -396,8 +450,31 @@ def load_model_tokenizer(path: str | Path) -> tuple[PreTrainedModel, PreTrainedT
     model.eval()
     model.zero_grad()
     if torch.cuda.is_available():
-        torch.cuda.synchronize()
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     gc.collect()
 
     return model, tokenizer
+
+
+def check_and_convert_neptune_overflow(value: Any) -> Any:
+    """
+    Check if the value is within the 32-bit signed integer range.
+    If not, convert it to a float.
+    """
+    INT32_MIN = -(2**31)
+    INT32_MAX = 2**31 - 1
+
+    if isinstance(value, int):
+        if value < INT32_MIN or value > INT32_MAX:
+            return float(value)
+    return value
+
+
+def fix_neptune_overflow_recursively(data: dict[str, Any] | list[Any] | Any) -> Any:
+    if isinstance(data, dict):
+        return {k: fix_neptune_overflow_recursively(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [fix_neptune_overflow_recursively(item) for item in data]
+    else:
+        return check_and_convert_neptune_overflow(data)
