@@ -393,7 +393,7 @@ def evaluate_model(
         dataset=inference_dataset,
         split=inference_dataset_split,
         device=device,
-        repeat=5,
+        repeat=3,
     )
 
     # Print the results
@@ -403,7 +403,7 @@ def evaluate_model(
         print(f"{task:>10}: {result:.4f}")
     print(
         f"Inference time: {inference_result.time_average:.2f}s ±{inference_result.time_std:.2f} "
-        f"on {inference_result.n_samples} samples ({5} repetitions)"
+        f"on {inference_result.n_samples} samples ({3} repetitions)"
     )
 
     return {
