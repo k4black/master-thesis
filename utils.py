@@ -126,6 +126,9 @@ def get_tokenized_dataset(
     elif name == "wikitext2":
         dataset_args = dict(path="Salesforce/wikitext", name="wikitext-2-v1")
         field = "text"
+    elif name == "c4":
+        dataset_args = dict(path="allenai/c4", name="en")
+        field = "text"
     else:
         raise NotImplementedError(f"Calibration dataset {name} is not supported.")
 

@@ -4,11 +4,10 @@ from typing import Optional
 
 import torch
 import typer
-from neptune.types import File
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
-from utils import create_neptune_run, evaluate_model, fix_neptune_overflow_recursively, set_random_seed, \
+from utils import create_neptune_run, evaluate_model, set_random_seed, \
     neptune_record_pruned_model
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
