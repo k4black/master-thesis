@@ -13,18 +13,17 @@ import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 from lm_eval.utils import make_table
+from neptune.types import File
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import BatchEncoding, PreTrainedModel, PreTrainedTokenizer, DataCollatorWithPadding
 
-from adaptive_pruning.utils import count_flops_macs_params
-
 
 LM_EVAL_NAME_TO_TASKS = {
-    "perplexity": ["wikitext", "pile_10k"],
+    "perplexity": ["wikitext"],
     "short": ["piqa", "boolq", "arc_easy"],
     "full": ["piqa", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"],
-    "extra": ["gsm8k", "gsm8k_cot", "toxigen", "truthfulqa_mc1"],  # "gsm8k_cot" and "toxigen" to long?
+    "extra": ["pile_10k", "gsm8k", "gsm8k_cot", "toxigen", "truthfulqa_mc1"],  # "gsm8k_cot" and "toxigen" to long?
     "bias": [
         "crows_pairs_english",
         "crows_pairs_english_age",
@@ -54,6 +53,7 @@ def create_neptune_run(
     lib: str,
     pruning_ratio: float,
     pruning_components: list[str],
+    num_iterations: int,
     calibration_dataset: str,
     calibration_batch_size: int,
     calibration_num_samples: int,
@@ -92,6 +92,7 @@ def create_neptune_run(
         "lib": lib,
         "pruning_ratio": pruning_ratio,
         "pruning_components": "+".join(pruning_components) if pruning_components else "",
+        "num_iterations": num_iterations,
         "calibration_dataset": calibration_dataset,
         "calibration_batch_size": calibration_batch_size,
         "calibration_num_samples": calibration_num_samples,
@@ -397,7 +398,6 @@ def evaluate_model(
 
     # Print the results
     print(f">> {batch_size=} ({batch_sizes}), {device=}, {dtype=}")
-    flops, macs, params, zero_params = count_flops_macs_params(model, tokenizer, print_results=True)
     print(make_table(lm_eval_results))
     for task, result in short_lm_eval_results.items():
         print(f"{task:>10}: {result:.4f}")
@@ -407,12 +407,6 @@ def evaluate_model(
     )
 
     return {
-        # TODO: fix int32 overflow in neptune
-        "flops": float(flops),
-        "macs": float(macs),
-        "params": float(params),
-        "zero_params": float(zero_params),
-        "zero_params_percent": zero_params / params * 100,
         "inference_dataset": inference_dataset + "/" + inference_dataset_split,
         "inference_time_average": inference_result.time_average,
         "inference_time_std": inference_result.time_std,
@@ -478,3 +472,24 @@ def fix_neptune_overflow_recursively(data: dict[str, Any] | list[Any] | Any) -> 
         return [fix_neptune_overflow_recursively(item) for item in data]
     else:
         return check_and_convert_neptune_overflow(data)
+
+
+def neptune_record_pruned_model(
+    neptune_run: neptune.Run,
+    original_model_stats: dict,
+    original_model_size: dict,
+    pruned_model_stats: dict | None,
+    pruned_model_size: dict | None,
+) -> None:
+    if pruned_model_stats:
+        neptune_run["pruning/pruned_stats"].upload(File.as_pickle(pruned_model_stats))
+    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
+
+    if pruned_model_size:
+        neptune_run["pruning/pruned_size"] = fix_neptune_overflow_recursively(pruned_model_size)
+    neptune_run["pruning/original_size"] = fix_neptune_overflow_recursively(original_model_size)
+
+    if pruned_model_size:
+        neptune_run["pruning/percent_left"] = pruned_model_size['params'] / original_model_size['params'] * 100
+    else:
+        neptune_run["pruning/percent_left"] = 100.0

@@ -6,8 +6,9 @@ export $(cat .env | xargs)
 . .venv/bin/activate
 
 
-base_model_name='meta-llama/Meta-Llama-3-8B'
 #base_model_name='huggyllama/llama-7b'
+base_model_name='meta-llama/Llama-2-7b-hf'
+#base_model_name='meta-llama/Meta-Llama-3-8B'
 
 echo "[START] - Start Original Model (0)"
 python run_original.py \

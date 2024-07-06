@@ -7,11 +7,8 @@ from typing import Optional
 import torch
 import typer
 from neptune.types import File
-from transformers import LlamaTokenizer
-
-from adaptive_pruning.utils import measure_model_stats
-
-
+from transformers import AutoTokenizer
+from dotenv import load_dotenv
 # from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 if typing.TYPE_CHECKING:
@@ -31,15 +28,16 @@ else:
     from LLMPruner.datasets.example_samples import get_examples
     from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
+from adaptive_pruning.utils import measure_model_stats
 from utils import (
     create_neptune_run,
     evaluate_model,
     fix_neptune_overflow_recursively,
     save_model_tokenizer,
-    set_random_seed,
+    set_random_seed, neptune_record_pruned_model,
 )
 
-
+load_dotenv()  # take environment variables
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
 
@@ -55,7 +53,8 @@ def main(
     taylor: str = "param_first",  # vectorize, param_second, param_first, param_mix
     max_seq_len: int = 128,
     channel_wise: bool = False,  # do channel wise or block wise pruning
-    block_wise: bool = False,  # do block wise or layer wise pruning
+    # block_wise: bool = False,  # do block wise or layer wise pruning
+    block_wise: bool = True,
     layer_wise: bool = False,  # do block wise or layer wise pruning
     keep_layers: int = 12,
     block_attention_layer_start: int = 4,
@@ -87,6 +86,7 @@ def main(
         lib="llm-pruner",
         pruning_ratio=pruning_ratio,
         pruning_components=pruning_components,
+        num_iterations=iterative_steps,
         calibration_dataset="bookcorpus",
         calibration_batch_size=1,
         calibration_num_samples=num_examples,
@@ -98,7 +98,7 @@ def main(
     )
 
     print(f"Loading model {base_model}...")
-    tokenizer = LlamaTokenizer.from_pretrained(base_model)
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
     model = LlamaForCausalLM.from_pretrained(base_model, low_cpu_mem_usage=True)
     if IS_CUDA_AVAILABLE:
         model.half()
@@ -109,8 +109,7 @@ def main(
 
     for param in model.parameters():
         param.requires_grad_(True)
-    original_model_stats = measure_model_stats(model, print_results=False)
-    before_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
 
     # Only for building the dependency graph.
     # Any input will be fine since the computation result are not taken into consideration.
@@ -242,11 +241,6 @@ def main(
 
             pruner.step()
 
-            after_pruning_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(
-                f"After Iter {i + 1}/{iterative_steps}, #parameters: {after_pruning_parameters}, "
-                f"Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
-            )
 
         # Clean the gradient in the model
         model.zero_grad()
@@ -267,15 +261,10 @@ def main(
     else:
         raise NotImplementedError
 
-    print(
-        f"#Param before: {before_pruning_parameters}, #Param after: {after_pruning_parameters}, "
-        f"Ratio = {100.0 * after_pruning_parameters / before_pruning_parameters:.4f}%"
-    )
 
     print("-" * 80)
-    pruned_model_stats = measure_model_stats(model, original_model_stats, print_results=True)
-    neptune_run["pruning/stats"].upload(File.as_pickle(pruned_model_stats))
-    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
+    pruned_model_stats, pruned_model_size = measure_model_stats(model, tokenizer, original_model_stats, print_results=True)
+    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as)

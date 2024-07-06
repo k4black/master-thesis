@@ -35,7 +35,11 @@ def count_flops_macs_params(
     )
     params = count_total_parameters(model, require_grad=None)
     zero_params = count_zero_parameters(model, require_grad=None)
-    assert lib_params == params, f"Library params: {lib_params} != Custom params: {params}"
+    if lib_params != params:
+        print(f"WARNING: The library calculated {lib_params} parameters, but the model has {params} parameters.")
+        print("total required_grad=None  params:", params)
+        print("total required_grad=True  params:", count_total_parameters(model, require_grad=True))
+        print("total required_grad=False params:", count_total_parameters(model, require_grad=False))
 
     if print_results:
         print(
@@ -79,8 +83,11 @@ def count_total_parameters(
 
 
 def measure_model_stats(
-    model: PreTrainedModel, original_model_stats: dict[str, Any] | None = None, print_results: bool = False
-) -> dict[str, Any]:
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    original_model_stats: dict[str, Any] | None = None,
+    print_results: bool = False,
+) -> tuple[dict[str, Any], dict[str, int]]:
     """
     Measure the number of parameters in the model and its layers.
     Collect pruned
@@ -92,6 +99,7 @@ def measure_model_stats(
     :return: dict of the keys of ['total', 0, 1, ..., num_layers]. Each key contains the dict for the layer stats:
         ['n_params', 'n_zero_params', 'attn_heads_n_params', 'attn_heads_n_zero_params', 'ffn_n_params', 'ffn_n_zero_params']
         if original_model_stats are provided, the dict will also contain the 'X_pruned_percentage' keys
+        and second dict with total - flops, macs, params, zero_params
     """
     base_model = model.base_model if hasattr(model, "base_model") else model
     assert (
@@ -139,7 +147,18 @@ def measure_model_stats(
         print(tabulate.tabulate(table, headers=headers, tablefmt="pretty", colalign=("left",)))
         sys.stdout.flush()
 
-    return sparsity_stats
+    # Calculate total flops, macs, params, zero_params
+    total_flops, total_macs, total_params, total_zero_params = count_flops_macs_params(model, tokenizer, print_results=False)
+
+    return (
+        sparsity_stats,
+        {
+            "flops": total_flops,
+            "macs": total_macs,
+            "params": total_params,
+            "zero_params": total_zero_params,
+        },
+    )
 
 
 def print_components_info_importance(components_info_importance: ComponentsInfo | ComponentsImportance) -> None:

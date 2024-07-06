@@ -8,8 +8,8 @@ from neptune.types import File
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
-from utils import create_neptune_run, evaluate_model, fix_neptune_overflow_recursively, set_random_seed
-
+from utils import create_neptune_run, evaluate_model, fix_neptune_overflow_recursively, set_random_seed, \
+    neptune_record_pruned_model
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
@@ -32,6 +32,7 @@ def main(
         lib="original",
         pruning_ratio=0.0,
         pruning_components=[],
+        num_iterations=0,
         calibration_dataset="",
         calibration_batch_size=0,
         calibration_num_samples=0,
@@ -53,15 +54,13 @@ def main(
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     print(f"Original Model: {base_model} loaded")
     count_flops_macs_params(model, tokenizer, print_results=True)
-    original_model_stats = measure_model_stats(model, print_results=False)
+    original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
 
     # print model with sample input
     print(model)
 
     print("-" * 80)
-    pruned_model_stats = measure_model_stats(model, original_model_stats, print_results=True)
-    neptune_run["pruning/stats"].upload(File.as_pickle(pruned_model_stats))
-    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
+    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, None, None)
 
     # Log pruned model
     if evaluate_on:

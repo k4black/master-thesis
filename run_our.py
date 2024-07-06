@@ -42,7 +42,7 @@ from utils import (
     fix_neptune_overflow_recursively,
     get_tokenized_dataset,
     save_model_tokenizer,
-    set_random_seed,
+    set_random_seed, neptune_record_pruned_model,
 )
 
 
@@ -64,6 +64,7 @@ def main(
     pruning_components: str = "attn_heads",  # attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state, all
     pruning_ratio: float = 0.5,
     num_samples: int = 256,
+    num_iterations: int = 1,
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
@@ -89,6 +90,7 @@ def main(
         lib="our",
         pruning_ratio=pruning_ratio,
         pruning_components=pruning_components_list,
+        num_iterations=num_iterations,
         calibration_dataset=pruning_dataset,
         calibration_batch_size=batch_size,
         calibration_num_samples=num_samples,
@@ -110,7 +112,7 @@ def main(
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     print(f"Original Model: {base_model} loaded")
     count_flops_macs_params(model, tokenizer, print_results=True)
-    original_model_stats = measure_model_stats(model, print_results=False)
+    original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
@@ -429,9 +431,9 @@ def main(
         )
 
     print("-" * 80)
-    pruned_model_stats = measure_model_stats(model, original_model_stats, print_results=True)
-    neptune_run["pruning/stats"].upload(File.as_pickle(pruned_model_stats))
-    neptune_run["pruning/original_stats"].upload(File.as_pickle(original_model_stats))
+    model.half()  # TODO: fix, next(model.parameters()).dtype float16, but error as full precision
+    pruned_model_stats, pruned_model_size = measure_model_stats(model, tokenizer, original_model_stats, print_results=True)
+    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as)

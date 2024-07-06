@@ -6,13 +6,15 @@ export $(cat .env | xargs)
 . .venv/bin/activate
 
 
-base_model_name='huggyllama/llama-7b'
-save_as='llm-pruner-llama-7b-pruned'
+#base_model_name='huggyllama/llama-7b'
+base_model_name='meta-llama/Llama-2-7b-hf'
+#base_model_name='meta-llama/Meta-Llama-3-8B'
+#save_as='llm-pruner-llama-7b-pruned'
 
-pruning_rations="0.05 0.1 0.2 0.3 0.4 0.5"
+pruning_ratios="0.05 0.1 0.2 0.3 0.4 0.5 0.6"
 
 
-for pruning_ratio in $pruning_rations; do
+for pruning_ratio in $pruning_ratios; do
     echo "-->>> >>> Pruning Ratio: $pruning_ratio <<< <<<--"
 
     echo "[START] - Start Pruning Model ($pruning_ratio)"
