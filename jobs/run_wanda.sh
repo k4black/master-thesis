@@ -27,3 +27,18 @@ for pruning_ratio in $pruning_ratios; do
     #    --save-model-as TBA
     echo "[END] - Finish Pruning Model ($pruning_ratio)"
 done
+
+extra_sparsity_types="2:4 4:8"
+for sparsity_type in $extra_sparsity_types; do
+    echo "-->>> >>> Sparsity Type: $sparsity_type <<< <<<--"
+
+    echo "[START] - Start Pruning Model ($sparsity_type)"
+    python run_wanda.py \
+        --base-model=$base_model_name \
+        --pruning-ratio 0.5 \
+        --sparsity-type $sparsity_type \
+        --prune-method "wanda" \
+        --evaluate-on="perplexity+full+bias"
+    #    --save-model-as TBA
+    echo "[END] - Finish Pruning Model ($sparsity_type)"
+done

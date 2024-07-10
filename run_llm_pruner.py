@@ -267,7 +267,7 @@ def main(
     neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
 
     if save_model_as:
-        save_model_tokenizer(model, tokenizer, "results/" + save_model_as)
+        save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)
 
     print("-" * 64)
     print(model)

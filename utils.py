@@ -23,8 +23,9 @@ LM_EVAL_NAME_TO_TASKS = {
     "perplexity": ["wikitext"],
     "short": ["piqa", "boolq", "arc_easy"],
     "full": ["piqa", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"],
-    "extra": ["pile_10k", "gsm8k", "gsm8k_cot", "toxigen", "truthfulqa_mc1"],  # "gsm8k_cot" and "toxigen" to long?
+    "extra": ["pile_10k", "gsm8k", "gsm8k_cot", "toxigen"],  # "gsm8k_cot" and "toxigen" to long?
     "bias": [
+        "truthfulqa_mc1",
         "crows_pairs_english",
         "crows_pairs_english_age",
         "crows_pairs_english_autre",
@@ -61,6 +62,7 @@ def create_neptune_run(
     calibration_how_to_average: str,  # mean, fisher_info, entropy, etc.
     calibration_how_to_overlap: str,  # fixed, relative, etc.
     save_model_as: str | None = None,
+    pruning_round_to: int | None = None,
     finetuning: bool = False,
     finetuning_dataset: str | None = None,
     finetuning_batch_size: int | None = None,
@@ -92,6 +94,7 @@ def create_neptune_run(
         "lib": lib,
         "pruning_ratio": pruning_ratio,
         "pruning_components": "+".join(pruning_components) if pruning_components else "",
+        "pruning_round_to": pruning_round_to or 1,
         "num_iterations": num_iterations,
         "calibration_dataset": calibration_dataset,
         "calibration_batch_size": calibration_batch_size,
@@ -118,6 +121,7 @@ def get_tokenized_dataset(
     n_samples: int | None = None,
     seq_len: int | None = None,
     streaming: bool = True,
+    drop_empty_strings: bool = True,
     padding: str | bool = 'longest',
 ) -> Dataset:
     if name == "bookcorpus":
@@ -133,8 +137,10 @@ def get_tokenized_dataset(
         raise NotImplementedError(f"Calibration dataset {name} is not supported.")
 
     dataset = load_dataset(
-        **dataset_args, split=split, streaming=streaming and n_samples is not None, trust_remote_code=True
+        **dataset_args, split=split, streaming=streaming and n_samples is not None, trust_remote_code=True,
     )
+    if drop_empty_strings:
+        dataset = dataset.filter(lambda x: x[field] != "")
     if n_samples:
         dataset = dataset.take(n_samples)
     if streaming:
@@ -246,11 +252,11 @@ class InferenceResult(NamedTuple):
 def measure_inference_time(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
-    dataset: str,
+    dataset: str = "wikitext2",
     split: str = "test",
     n_samples: int | None = None,
     device: str = "auto",
-    repeat: int = 5,
+    repeat: int = 3,
 ) -> InferenceResult:
     print(f"Measure inference time on {dataset}/{split} select {n_samples}")
     # Resolve device
@@ -419,7 +425,11 @@ def evaluate_model(
     }
 
 
-def save_model_tokenizer(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, path: str | Path) -> None:
+def save_model_tokenizer(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer, path: str | Path,
+    neptune_run: neptune.Run | None = None
+) -> None:
     model_path = Path(path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -430,6 +440,7 @@ def save_model_tokenizer(model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
         {
             "model": model,
             "tokenizer": tokenizer,
+            "neptune_run_id": str(neptune_run._sys_id) if neptune_run else None,
         },
         model_path,
     )
@@ -493,6 +504,10 @@ def neptune_record_pruned_model(
     neptune_run["pruning/original_size"] = fix_neptune_overflow_recursively(original_model_size)
 
     if pruned_model_size:
+        # percent of original params
         neptune_run["pruning/percent_left"] = pruned_model_size['params'] / original_model_size['params'] * 100
+        # non zero percent of original params
+        neptune_run["pruning/percent_nonzero_left"] = (pruned_model_size['params'] - pruned_model_size['zero_params']) / original_model_size['params'] * 100
     else:
         neptune_run["pruning/percent_left"] = 100.0
+        neptune_run["pruning/percent_nonzero_left"] = 100.0

@@ -12,7 +12,9 @@ base_model_name='meta-llama/Llama-2-7b-hf'
 #save_as='llm-pruner-llama-7b-pruned'
 
 pruning_ratios="0.05 0.1 0.2 0.3 0.4 0.5 0.6"
-what_to_prune_list="attn_heads+ffn_neurons attn_heads_uniform+ffn_neurons_uniform"
+#what_to_prune_list="attn_heads+ffn_neurons attn_heads_uniform+ffn_neurons_uniform"
+#what_to_prune_list="attn_heads+ffn_neurons"
+what_to_prune_list="attn_heads_uniform+ffn_neurons_uniform"
 
 
 for what_to_prune in $what_to_prune_list; do
@@ -27,6 +29,7 @@ for what_to_prune in $what_to_prune_list; do
             --pruning-components $what_to_prune \
             --pruning-ratio $pruning_ratio \
             --batch-size 8 \
+            --round-to 256 \
             --how-to-collect "grads" \
             --how-to-average "fisher_info" \
             --how-to-overlap "fixed" \

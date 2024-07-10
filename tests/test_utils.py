@@ -8,8 +8,7 @@ from adaptive_pruning.utils import (
     count_total_parameters,
     count_zero_parameters,
     format_number,
-    measure_original_model_stats,
-    measure_pruned_model_stats,
+    measure_model_stats
 )
 
 

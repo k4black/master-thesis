@@ -39,7 +39,6 @@ from adaptive_pruning.utils import (
 from utils import (
     create_neptune_run,
     evaluate_model,
-    fix_neptune_overflow_recursively,
     get_tokenized_dataset,
     save_model_tokenizer,
     set_random_seed, neptune_record_pruned_model,
@@ -65,9 +64,11 @@ def main(
     pruning_ratio: float = 0.5,
     num_samples: int = 256,
     num_iterations: int = 1,
+    round_to: int = 1,
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
+    extra_tags: Optional[str] = None,  # split by +
 ) -> None:
     set_random_seed(seed)
 
@@ -90,6 +91,7 @@ def main(
         lib="our",
         pruning_ratio=pruning_ratio,
         pruning_components=pruning_components_list,
+        pruning_round_to=round_to,
         num_iterations=num_iterations,
         calibration_dataset=pruning_dataset,
         calibration_batch_size=batch_size,
@@ -98,7 +100,7 @@ def main(
         calibration_how_to_average=how_to_average,
         calibration_how_to_overlap=how_to_overlap,
         save_model_as=save_model_as,
-        extra_tags=["our"],
+        extra_tags=["our"] if not extra_tags else ["our"] + extra_tags.split("+"),
     )
 
     # Load the finetuned model and the corresponding tokenizer
@@ -336,11 +338,13 @@ def main(
         components_importance.attention_layers_importance,
         attention_layers_pruning_ratio,
     )
+    head_size = config.hidden_size // config.num_attention_heads
     attention_heads_to_prune = select_to_prune_attention_heads(
         components_importance.attention_heads_importance,
         attention_heads_pruning_ratio,
         uniform_among_layers=do_prune_attention_heads_uniform,
         key_value_group_size=config.num_attention_heads // config.num_key_value_heads,
+        round_to_heads=round_to//head_size or 1,
     )
     attention_heads_to_prune = {
         layer: heads for layer, heads in attention_heads_to_prune.items() if layer not in attention_layers_to_prune
@@ -354,6 +358,7 @@ def main(
         components_importance.ffn_neurons_importance,
         ffn_neurons_pruning_ratio,
         uniform_among_layers=do_prune_ffn_neurons_uniform,
+        round_to=round_to,
     )
     neurons_to_prune = {
         layer: neurons for layer, neurons in neurons_to_prune.items() if layer not in attention_layers_to_prune
@@ -361,6 +366,7 @@ def main(
     hidden_states_to_prune = select_to_prune_hidden_states(
         components_importance.hidden_states_importance,
         hidden_states_pruning_ratio,
+        round_to=round_to,
     )
 
     # prune
@@ -436,7 +442,7 @@ def main(
     neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
 
     if save_model_as:
-        save_model_tokenizer(model, tokenizer, "results/" + save_model_as)
+        save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)
 
     # Log pruned model
     if evaluate_on:

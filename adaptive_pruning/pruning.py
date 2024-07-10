@@ -362,6 +362,8 @@ def select_to_prune_attention_heads(
     percent_heads_to_prune: float,
     uniform_among_layers: bool = False,
     key_value_group_size: int = 1,
+    round_to_heads: int = 1,
+    keep_at_least_one_head: bool = True,
 ) -> dict[int, list[int]]:
     """
     Select least-k attention heads based on the importance scores.
@@ -374,6 +376,9 @@ def select_to_prune_attention_heads(
     :param percent_heads_to_prune: The percentage of attention heads to keep
     :param uniform_among_layers: If True, prune the same number of heads from each layer
     :param key_value_group_size: The number of attention heads to group together for key and value projections; 1 means no grouping
+    :param round_to_heads: The number of heads to group together for pruning
+        TODO: Think to group K or QV heads. For now, round grouped heads number
+    :param keep_at_least_one_head: If True, keep at least 1 head per layer
     :return: A dictionary with the layer indices as keys and a list of head indices to prune as values
     """
     assert 0 <= percent_heads_to_prune <= 1, "percent_heads_to_prune should be in [0, 1]"
@@ -392,6 +397,7 @@ def select_to_prune_attention_heads(
 
     if uniform_among_layers:
         num_heads_to_prune = int(num_heads * percent_heads_to_prune)
+        num_heads_to_prune = round(num_heads_to_prune / round_to_heads) * round_to_heads
 
         for layer_index in range(num_layers):
             # sort heads by importance
@@ -415,12 +421,19 @@ def select_to_prune_attention_heads(
             head_index = head_index % num_heads
             heads_to_prune.setdefault(layer_index, []).append(head_index)
 
-    # keep at least 1 head per layer, remove unused heads_to_prune lists
-    for layer in list(heads_to_prune.keys()):
-        if len(heads_to_prune[layer]) == num_heads:
-            heads_to_prune[layer].pop()
-        if len(heads_to_prune[layer]) == 0:
-            del heads_to_prune[layer]
+        # round to the nearest round_to_heads for each layer (drop excess heads)
+        for layer, heads in heads_to_prune.items():
+            num_heads_to_prune_layer = len(heads)
+            num_heads_to_prune_layer = round(num_heads_to_prune_layer / round_to_heads) * round_to_heads
+            heads_to_prune[layer] = heads[:num_heads_to_prune_layer]
+
+    # keep at least 1 head per layer (or round_to_heads), remove unused heads_to_prune lists
+    if keep_at_least_one_head:
+        for layer in list(heads_to_prune.keys()):
+            if len(heads_to_prune[layer]) == num_heads:
+                heads_to_prune[layer] = heads_to_prune[layer][: num_heads - round_to_heads]
+            if len(heads_to_prune[layer]) == 0:
+                del heads_to_prune[layer]
 
     # expand the grouped heads to the original size
     if key_value_group_size != 1:
@@ -433,7 +446,10 @@ def select_to_prune_attention_heads(
     return heads_to_prune
 
 
-def select_to_prune_attention_layers(importance_scores: torch.Tensor, percent_layers_to_prune: float) -> list[int]:
+def select_to_prune_attention_layers(
+    importance_scores: torch.Tensor,
+    percent_layers_to_prune: float,
+) -> list[int]:
     """
     Select least-k attention layers based on the importance scores.
 
@@ -453,7 +469,10 @@ def select_to_prune_attention_layers(importance_scores: torch.Tensor, percent_la
 
 
 def select_to_prune_ffn_neurons(
-    importance_scores: torch.Tensor, percent_neurons_to_prune: float, uniform_among_layers: bool = False
+    importance_scores: torch.Tensor,
+    percent_neurons_to_prune: float,
+    uniform_among_layers: bool = False,
+    round_to: int = 1,
 ) -> dict[int, list[int]]:
     """
     Select least-k feed forward neurons based on the importance scores.
@@ -461,6 +480,7 @@ def select_to_prune_ffn_neurons(
     :param importance_scores: The importance scores of the feed forward neurons [num_hidden_layers, intermediate_size]
     :param percent_neurons_to_prune: The percentage of feed forward neurons to keep
     :param uniform_among_layers: If True, prune the same number of neurons from each layer
+    :param round_to: The number of neurons to group together for pruning (round to the nearest round_to) for gpu opts
     :return: A dictionary with the layer indices as keys and a list of neuron indices to prune as values
     """
     assert 0 <= percent_neurons_to_prune <= 1, "percent_neurons_to_prune should be in [0, 1]"
@@ -470,6 +490,7 @@ def select_to_prune_ffn_neurons(
 
     if uniform_among_layers:
         num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
+        num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
 
         for layer_index in range(num_layers):
             # sort neurons by importance
@@ -493,10 +514,19 @@ def select_to_prune_ffn_neurons(
             neuron_index = neuron_index % num_neurons
             neurons_to_prune.setdefault(layer_index, []).append(neuron_index)
 
+        # round to the nearest round_to for each layer (drop excess neurons)
+        for layer, neurons in neurons_to_prune.items():
+            num_neurons_to_prune_layer = len(neurons)
+            num_neurons_to_prune_layer = round(num_neurons_to_prune_layer / round_to) * round_to
+            neurons_to_prune[layer] = neurons[:num_neurons_to_prune_layer]
+
     return neurons_to_prune
 
 
-def select_to_prune_ffn_layers(importance_scores: torch.Tensor, percent_layers_to_prune: float) -> list[int]:
+def select_to_prune_ffn_layers(
+    importance_scores: torch.Tensor,
+    percent_layers_to_prune: float,
+) -> list[int]:
     """
     Select least-k feed forward layers based on the importance scores.
 
@@ -515,7 +545,11 @@ def select_to_prune_ffn_layers(importance_scores: torch.Tensor, percent_layers_t
     return layers_to_prune
 
 
-def select_to_prune_hidden_states(importance_scores: torch.Tensor, percent_neurons_to_prune: float) -> list[int]:
+def select_to_prune_hidden_states(
+    importance_scores: torch.Tensor,
+    percent_neurons_to_prune: float,
+    round_to: int = 1,
+) -> list[int]:
     """
     Select least-k neurons based on the importance scores.
 

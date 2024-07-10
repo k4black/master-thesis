@@ -1,4 +1,3 @@
-import argparse
 import os
 import typing
 from dataclasses import dataclass
@@ -6,26 +5,21 @@ from typing import Optional, Any
 from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
 import torch
 import typer
-from datasets import load_dataset, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from adaptive_pruning.utils import measure_model_stats, count_flops_macs_params
 from utils import neptune_record_pruned_model, save_model_tokenizer, evaluate_model, set_random_seed, \
-    create_neptune_run, get_tokenized_dataset
+    create_neptune_run
 
 if typing.TYPE_CHECKING:
-    from external.wanda.lib.eval import eval_ppl, eval_zero_shot
     from external.wanda.lib.prune import check_sparsity, prune_ablate, prune_magnitude, prune_sparsegpt, prune_wanda
-    from external.wanda.lib import data
 else:
     # add external.llm_pruner to access LLMPruner
     os.sys.path.append((Path(__file__).parent / "external" / "wanda").as_posix())
-    from lib.eval import eval_ppl, eval_zero_shot
     from lib.prune import check_sparsity, prune_ablate, prune_magnitude, prune_sparsegpt, prune_wanda
-    from lib import data
 
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -91,7 +85,7 @@ def main(
         base_model=base_model,
         lib="wanda",
         pruning_ratio=pruning_ratio,
-        pruning_components=["weights"],
+        pruning_components=["weights"] if sparsity_type == "unstructured" else [f"weights-{sparsity_type}"],
         num_iterations=1,  # TBA
         calibration_dataset="c4",
         calibration_batch_size=1,
@@ -156,7 +150,7 @@ def main(
     neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
 
     if save_model_as:
-        save_model_tokenizer(model, tokenizer, "results/" + save_model_as)
+        save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)
 
     # Log pruned model
     if evaluate_on:

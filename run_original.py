@@ -8,7 +8,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
 from utils import create_neptune_run, evaluate_model, set_random_seed, \
-    neptune_record_pruned_model
+    neptune_record_pruned_model, save_model_tokenizer
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
@@ -22,6 +22,7 @@ def main(
     base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
+    save_model_as: Optional[str] = None,
 ) -> None:
     set_random_seed(seed)
 
@@ -38,8 +39,8 @@ def main(
         calibration_how_to_collect="",
         calibration_how_to_average="",
         calibration_how_to_overlap="",
-        save_model_as="",
-        extra_tags=["original"],
+        save_model_as=save_model_as,
+        extra_tags=["original", "baseline"],
     )
 
     # Load the finetuned model and the corresponding tokenizer
@@ -60,6 +61,9 @@ def main(
 
     print("-" * 80)
     neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, None, None)
+
+    if save_model_as:
+        save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)
 
     # Log pruned model
     if evaluate_on:
