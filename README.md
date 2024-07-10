@@ -13,6 +13,7 @@ source .venv/bin/activate
 and install the requirements:
 ```bash
 python -m pip install -r requirements.txt
+python -m pip install -r requirements.test.txt
 ```
 
 
@@ -20,5 +21,5 @@ Check partitions on https://pegasus.dfki.de/docs/slurm-cluster/partitions/
 ```bash
 # sh run_slurm_jobs.sh [PARTITION] [SCRIPT]
 # E.g.
-sh run_slurm_jobs.sh "A100-40GB" ./jobs/run_original.sh
+sh run_slurm_jobs.sh A100-80GB ./jobs/run_original.sh
 ```

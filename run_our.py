@@ -40,8 +40,9 @@ from utils import (
     create_neptune_run,
     evaluate_model,
     get_tokenized_dataset,
+    neptune_record_pruned_model,
     save_model_tokenizer,
-    set_random_seed, neptune_record_pruned_model,
+    set_random_seed,
 )
 
 
@@ -344,7 +345,7 @@ def main(
         attention_heads_pruning_ratio,
         uniform_among_layers=do_prune_attention_heads_uniform,
         key_value_group_size=config.num_attention_heads // config.num_key_value_heads,
-        round_to_heads=round_to//head_size or 1,
+        round_to_heads=round_to // head_size or 1,
     )
     attention_heads_to_prune = {
         layer: heads for layer, heads in attention_heads_to_prune.items() if layer not in attention_layers_to_prune
@@ -438,8 +439,12 @@ def main(
 
     print("-" * 80)
     model.half()  # TODO: fix, next(model.parameters()).dtype float16, but error as full precision
-    pruned_model_stats, pruned_model_size = measure_model_stats(model, tokenizer, original_model_stats, print_results=True)
-    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
+    pruned_model_stats, pruned_model_size = measure_model_stats(
+        model, tokenizer, original_model_stats, print_results=True
+    )
+    neptune_record_pruned_model(
+        neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size
+    )
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)

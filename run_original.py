@@ -7,8 +7,8 @@ import typer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
-from utils import create_neptune_run, evaluate_model, set_random_seed, \
-    neptune_record_pruned_model, save_model_tokenizer
+from utils import create_neptune_run, evaluate_model, neptune_record_pruned_model, save_model_tokenizer, set_random_seed
+
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")

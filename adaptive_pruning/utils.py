@@ -128,19 +128,42 @@ def measure_model_stats(
     }
 
     if print_results:
-        headers = ["Layer", "#Total\nParams", "#Total\n%Zero", "#Total\n%Pruned", "#Attn-Heads\nParams", "#Attn-Heads\n%Zero", "#Attn Heads\n%Pruned", "#FFN\nParams", "#FFN\n%Zero", "#FFN\n%Pruned"]
+        headers = [
+            "Layer",
+            "#Total\nParams",
+            "#Total\n%Zero",
+            "#Total\n%Pruned",
+            "#Attn-Heads\nParams",
+            "#Attn-Heads\n%Zero",
+            "#Attn Heads\n%Pruned",
+            "#FFN\nParams",
+            "#FFN\n%Zero",
+            "#FFN\n%Pruned",
+        ]
         table = [
             [
                 key,
                 format_number(values["n_params"]),
                 f"{values['n_zero_params']/values['n_params']*100:.2f}%",
-                f"{(original_model_stats[key]['n_params']-values['n_params'])/original_model_stats[key]['n_params']*100:.2f}%" if original_model_stats else "-",
+                (
+                    f"{(original_model_stats[key]['n_params']-values['n_params'])/original_model_stats[key]['n_params']*100:.2f}%"
+                    if original_model_stats
+                    else "-"
+                ),
                 format_number(values["attn_heads_n_params"]),
                 f"{values['attn_heads_n_zero_params']/values['attn_heads_n_params']*100:.2f}%",
-                f"{(original_model_stats[key]['attn_heads_n_params']-values['attn_heads_n_params'])/original_model_stats[key]['attn_heads_n_params']*100:.2f}%" if original_model_stats else "-",
+                (
+                    f"{(original_model_stats[key]['attn_heads_n_params']-values['attn_heads_n_params'])/original_model_stats[key]['attn_heads_n_params']*100:.2f}%"
+                    if original_model_stats
+                    else "-"
+                ),
                 format_number(values["ffn_n_params"]),
                 f"{values['ffn_n_zero_params']/values['ffn_n_params']*100:.2f}%",
-                f"{(original_model_stats[key]['ffn_n_params']-values['ffn_n_params'])/original_model_stats[key]['ffn_n_params']*100:.2f}%" if original_model_stats else "-",
+                (
+                    f"{(original_model_stats[key]['ffn_n_params']-values['ffn_n_params'])/original_model_stats[key]['ffn_n_params']*100:.2f}%"
+                    if original_model_stats
+                    else "-"
+                ),
             ]
             for key, values in sparsity_stats.items()
         ]
@@ -148,7 +171,9 @@ def measure_model_stats(
         sys.stdout.flush()
 
     # Calculate total flops, macs, params, zero_params
-    total_flops, total_macs, total_params, total_zero_params = count_flops_macs_params(model, tokenizer, print_results=False)
+    total_flops, total_macs, total_params, total_zero_params = count_flops_macs_params(
+        model, tokenizer, print_results=False
+    )
 
     return (
         sparsity_stats,

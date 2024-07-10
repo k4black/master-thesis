@@ -7,10 +7,10 @@ import torch
 import typer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
 from adaptive_pruning.pruning import prune_ffn_neurons
-from utils import create_neptune_run, set_random_seed, \
-    neptune_record_pruned_model, measure_inference_time
+from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
+from utils import create_neptune_run, measure_inference_time, neptune_record_pruned_model, set_random_seed
+
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
 print(f"CUDA_AVAILABLE: {IS_CUDA_AVAILABLE}")
@@ -65,24 +65,17 @@ def main(
     if pruning_ratio > 0:
         # Caclulate the number of neurons to prune
         if is_uniform:
-            ratios_to_prune = {
-                i: pruning_ratio
-                for i in range(model.config.num_hidden_layers)
-            }
+            ratios_to_prune = {i: pruning_ratio for i in range(model.config.num_hidden_layers)}
         else:
             random_pruning_rates = np.random.normal(pruning_ratio, 0.05, model.config.num_hidden_layers)
             random_pruning_rates = random_pruning_rates + (np.mean(random_pruning_rates) - pruning_ratio)
             random_pruning_rates = np.clip(random_pruning_rates, 0.0, 0.9)
 
-            ratios_to_prune = {
-                i: random_pruning_rates[i]
-                for i in range(model.config.num_hidden_layers)
-            }
+            ratios_to_prune = {i: random_pruning_rates[i] for i in range(model.config.num_hidden_layers)}
         print(f"Pruning ratios: {ratios_to_prune}")
 
         num_of_neurons_to_prune = {
-            i: int(ratios_to_prune[i] * model.config.intermediate_size)
-            for i in range(model.config.num_hidden_layers)
+            i: int(ratios_to_prune[i] * model.config.intermediate_size) for i in range(model.config.num_hidden_layers)
         }
         if round_to is not None:
             num_of_neurons_to_prune = {
@@ -101,11 +94,14 @@ def main(
         # Prune the model
         prune_ffn_neurons(model, neurons_to_prune)
 
-
     print("-" * 80)
     model.half()  # TODO: fix this in pruning code, keep same dtype as before
-    pruned_model_stats, pruned_model_size = measure_model_stats(model, tokenizer, original_model_stats, print_results=True)
-    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
+    pruned_model_stats, pruned_model_size = measure_model_stats(
+        model, tokenizer, original_model_stats, print_results=True
+    )
+    neptune_record_pruned_model(
+        neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size
+    )
 
     # Measure inference time
     inference_result = measure_inference_time(

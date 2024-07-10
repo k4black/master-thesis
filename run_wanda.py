@@ -1,8 +1,8 @@
 import os
 import typing
 from dataclasses import dataclass
-from typing import Optional, Any
 from pathlib import Path
+from typing import Any, Optional
 from unittest.mock import patch
 
 import torch
@@ -10,9 +10,9 @@ import typer
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from adaptive_pruning.utils import measure_model_stats, count_flops_macs_params
-from utils import neptune_record_pruned_model, save_model_tokenizer, evaluate_model, set_random_seed, \
-    create_neptune_run
+from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
+from utils import create_neptune_run, evaluate_model, neptune_record_pruned_model, save_model_tokenizer, set_random_seed
+
 
 if typing.TYPE_CHECKING:
     from external.wanda.lib.prune import check_sparsity, prune_ablate, prune_magnitude, prune_sparsegpt, prune_wanda
@@ -51,6 +51,7 @@ class WandaLibArgs:
     to avoid modifying the library, we define dummy dataclass to pass the args in the library.
     Commented out args are not used in the library.
     """
+
     # model: int
     seed: int
     nsamples: int
@@ -66,7 +67,9 @@ def main(
     pruning_ratio: float = 0.5,
     num_samples: int = 128,
     sparsity_type: Optional[str] = "unstructured",  # ["unstructured", "4:8", "2:4"]
-    prune_method: Optional[str] = "wanda",  # ["magnitude", "wanda", "sparsegpt", "ablate_mag_seq", "ablate_wanda_seq", "ablate_mag_iter", "ablate_wanda_iter", "search"]
+    prune_method: Optional[
+        str
+    ] = "wanda",  # ["magnitude", "wanda", "sparsegpt", "ablate_mag_seq", "ablate_wanda_seq", "ablate_mag_iter", "ablate_wanda_iter", "search"]
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
@@ -126,7 +129,7 @@ def main(
 
     if pruning_ratio != 0:
         # WARNING: Patch load_dataset to fix C4 loading issue, see load_datasets_fix docstring
-        with patch('lib.data.load_dataset', new=load_datasets_fix):
+        with patch("lib.data.load_dataset", new=load_datasets_fix):
             print("pruning starts")
             if prune_method == "wanda":
                 prune_wanda(custom_args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
@@ -146,8 +149,12 @@ def main(
 
     print("-" * 80)
     model.half()  # TODO: fix, next(model.parameters()).dtype float16, but error as full precision
-    pruned_model_stats, pruned_model_size = measure_model_stats(model, tokenizer, original_model_stats, print_results=True)
-    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
+    pruned_model_stats, pruned_model_size = measure_model_stats(
+        model, tokenizer, original_model_stats, print_results=True
+    )
+    neptune_record_pruned_model(
+        neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size
+    )
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)

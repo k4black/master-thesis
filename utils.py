@@ -16,7 +16,7 @@ from lm_eval.utils import make_table
 from neptune.types import File
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import BatchEncoding, PreTrainedModel, PreTrainedTokenizer, DataCollatorWithPadding
+from transformers import BatchEncoding, DataCollatorWithPadding, PreTrainedModel, PreTrainedTokenizer
 
 
 LM_EVAL_NAME_TO_TASKS = {
@@ -79,9 +79,9 @@ def create_neptune_run(
         ]
     )
 
-    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'
+    device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
     device_gpu_memory = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
-    device_gpu_memory_gb = device_gpu_memory / 1024 ** 3
+    device_gpu_memory_gb = device_gpu_memory / 1024**3
 
     assert isinstance(pruning_components, list)
 
@@ -122,7 +122,7 @@ def get_tokenized_dataset(
     seq_len: int | None = None,
     streaming: bool = True,
     drop_empty_strings: bool = True,
-    padding: str | bool = 'longest',
+    padding: str | bool = "longest",
 ) -> Dataset:
     if name == "bookcorpus":
         dataset_args = dict(path="bookcorpus")
@@ -137,7 +137,10 @@ def get_tokenized_dataset(
         raise NotImplementedError(f"Calibration dataset {name} is not supported.")
 
     dataset = load_dataset(
-        **dataset_args, split=split, streaming=streaming and n_samples is not None, trust_remote_code=True,
+        **dataset_args,
+        split=split,
+        streaming=streaming and n_samples is not None,
+        trust_remote_code=True,
     )
     if drop_empty_strings:
         dataset = dataset.filter(lambda x: x[field] != "")
@@ -284,7 +287,7 @@ def measure_inference_time(
         seq_len=None,
         padding=False,
     )
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding='longest', return_tensors="pt")
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="longest", return_tensors="pt")
     tokenized_dataloader = DataLoader(
         tokenized_dataset,
         batch_size=1,
@@ -390,10 +393,14 @@ def evaluate_model(
         ][0]
         for task, task_results in lm_eval_results["results"].items()
     }
-    print('short_lm_eval_results', short_lm_eval_results)
+    print("short_lm_eval_results", short_lm_eval_results)
     # add average across all present tasks in short and full LM_EVAL_NAME_TO_TASKS (None if some task is missing)
-    short_lm_eval_results['short_average'] = np.mean([short_lm_eval_results.get(task, np.nan) for task in LM_EVAL_NAME_TO_TASKS['short']])
-    short_lm_eval_results['full_average'] = np.mean([short_lm_eval_results.get(task, np.nan) for task in LM_EVAL_NAME_TO_TASKS['full']])
+    short_lm_eval_results["short_average"] = np.mean(
+        [short_lm_eval_results.get(task, np.nan) for task in LM_EVAL_NAME_TO_TASKS["short"]]
+    )
+    short_lm_eval_results["full_average"] = np.mean(
+        [short_lm_eval_results.get(task, np.nan) for task in LM_EVAL_NAME_TO_TASKS["full"]]
+    )
 
     # Measure inference time
     inference_result: InferenceResult = measure_inference_time(
@@ -426,9 +433,7 @@ def evaluate_model(
 
 
 def save_model_tokenizer(
-    model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizer, path: str | Path,
-    neptune_run: neptune.Run | None = None
+    model: PreTrainedModel, tokenizer: PreTrainedTokenizer, path: str | Path, neptune_run: neptune.Run | None = None
 ) -> None:
     model_path = Path(path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -505,9 +510,11 @@ def neptune_record_pruned_model(
 
     if pruned_model_size:
         # percent of original params
-        neptune_run["pruning/percent_left"] = pruned_model_size['params'] / original_model_size['params'] * 100
+        neptune_run["pruning/percent_left"] = pruned_model_size["params"] / original_model_size["params"] * 100
         # non zero percent of original params
-        neptune_run["pruning/percent_nonzero_left"] = (pruned_model_size['params'] - pruned_model_size['zero_params']) / original_model_size['params'] * 100
+        neptune_run["pruning/percent_nonzero_left"] = (
+            (pruned_model_size["params"] - pruned_model_size["zero_params"]) / original_model_size["params"] * 100
+        )
     else:
         neptune_run["pruning/percent_left"] = 100.0
         neptune_run["pruning/percent_nonzero_left"] = 100.0

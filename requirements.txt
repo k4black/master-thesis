@@ -6,6 +6,7 @@ accelerate>=0.30.0,<0.35.0
 peft>=0.8.0,<0.12.0
 torch>=2.3.0,<3.0.0
 sentencepiece>=0.2.0,<0.3.0
+deepspeed>=0.14.0,<0.15.0
 
 # for metrics
 evaluate>=0.4.0,<0.5.0
@@ -14,7 +15,7 @@ scikit-learn
 lm-eval>=0.4.3,<0.5.0
 # lm-eval[vllm]>=0.4.3,<0.5.0; sys_platform != "darwin"
 # lm-eval>=0.4.3,<0.5.0; sys_platform == "darwin"
-calflops
+calflops>=0.3.0,<0.4.0
 
 # utils
 python-dotenv

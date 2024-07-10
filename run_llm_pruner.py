@@ -6,9 +6,11 @@ from typing import Optional
 
 import torch
 import typer
+from dotenv import load_dotenv
 from neptune.types import File
 from transformers import AutoTokenizer
-from dotenv import load_dotenv
+
+
 # from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 if typing.TYPE_CHECKING:
@@ -33,9 +35,11 @@ from utils import (
     create_neptune_run,
     evaluate_model,
     fix_neptune_overflow_recursively,
+    neptune_record_pruned_model,
     save_model_tokenizer,
-    set_random_seed, neptune_record_pruned_model,
+    set_random_seed,
 )
+
 
 load_dotenv()  # take environment variables
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -241,7 +245,6 @@ def main(
 
             pruner.step()
 
-
         # Clean the gradient in the model
         model.zero_grad()
         for name, module in model.named_parameters():
@@ -261,10 +264,13 @@ def main(
     else:
         raise NotImplementedError
 
-
     print("-" * 80)
-    pruned_model_stats, pruned_model_size = measure_model_stats(model, tokenizer, original_model_stats, print_results=True)
-    neptune_record_pruned_model(neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size)
+    pruned_model_stats, pruned_model_size = measure_model_stats(
+        model, tokenizer, original_model_stats, print_results=True
+    )
+    neptune_record_pruned_model(
+        neptune_run, original_model_stats, original_model_size, pruned_model_stats, pruned_model_size
+    )
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)
