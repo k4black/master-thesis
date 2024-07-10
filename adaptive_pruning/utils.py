@@ -87,7 +87,7 @@ def measure_model_stats(
     tokenizer: PreTrainedTokenizer,
     original_model_stats: dict[str, Any] | None = None,
     print_results: bool = False,
-) -> tuple[dict[str, Any], dict[str, int]]:
+) -> tuple[dict[str | int, Any], dict[str, int]]:
     """
     Measure the number of parameters in the model and its layers.
     Collect pruned

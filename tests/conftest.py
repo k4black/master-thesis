@@ -6,6 +6,7 @@ from transformers import DataCollatorWithPadding, PretrainedConfig, PreTrainedMo
 
 
 HF_TINY_BERT = "prajjwal1/bert-tiny"
+HF_TINY_LLAMA = "TinyLlama/TinyLlama_v1.1"
 
 
 @pytest.fixture
@@ -93,6 +94,15 @@ def llama_test_config() -> PretrainedConfig:
 
 
 @pytest.fixture
+def llama_test_tokenizer(llama_test_config: PretrainedConfig) -> PreTrainedTokenizer:
+    from transformers import LlamaTokenizer
+
+    tokenizer = LlamaTokenizer.from_pretrained(HF_TINY_LLAMA, legacy=True)
+
+    return tokenizer
+
+
+@pytest.fixture
 def llama_lm_test_model(llama_test_config: PretrainedConfig) -> PreTrainedModel:
     from transformers import LlamaForCausalLM
 
@@ -153,14 +163,32 @@ def random_input_batch() -> dict[str, torch.Tensor]:
 
 
 @pytest.fixture
-def random_dataloader(bert_test_tokenizer: PreTrainedTokenizer) -> DataLoader:
+def random_clf_dataloader(bert_test_tokenizer: PreTrainedTokenizer) -> DataLoader:
     return DataLoader(
         Dataset.from_list(
             [
                 {
-                    "input_ids": torch.randint(0, 100, (10,)),
-                    "attention_mask": torch.randint(0, 2, (10,)),
+                    "input_ids": torch.randint(1, 100, (10,)),
+                    "attention_mask": torch.randint(1, 2, (10,)),
                     "label": torch.randint(0, 3, ()),
+                }
+                for _ in range(8)
+            ]
+        ),
+        collate_fn=DataCollatorWithPadding(tokenizer=bert_test_tokenizer),
+        batch_size=4,
+    )
+
+
+@pytest.fixture
+def random_lm_dataloader(bert_test_tokenizer: PreTrainedTokenizer) -> DataLoader:
+    return DataLoader(
+        Dataset.from_list(
+            [
+                {
+                    "input_ids": torch.randint(1, 100, (10,)),
+                    "attention_mask": torch.randint(1, 2, (10,)),
+                    "labels": torch.randint(1, 100, (10,)),
                 }
                 for _ in range(8)
             ]

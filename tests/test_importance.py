@@ -35,12 +35,12 @@ class TestCollect:
         ],
     )
     def test_all_collectors_random_input(
-        self, collector: Callable, bert_clf_test_model: PreTrainedModel, random_dataloader: DataLoader
+        self, collector: Callable, llama_lm_test_model: PreTrainedModel, random_lm_dataloader: DataLoader
     ) -> None:
-        result = collector(bert_clf_test_model, random_dataloader)
+        result = collector(llama_lm_test_model, random_lm_dataloader)
         assert isinstance(result, ComponentsInfo)
         for field_name, value in result._asdict().items():
-            assert value.shape[0] in [0, 2, 8], field_name  # batched or full
+            assert value.shape[0] in [1, 2, 8], field_name  # batched or full
 
 
 class TestInfoTo:

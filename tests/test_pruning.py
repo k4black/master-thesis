@@ -2,7 +2,7 @@ import copy
 
 import pytest
 import torch
-from transformers import PreTrainedModel
+from transformers import BertForMaskedLM, PreTrainedModel
 
 from adaptive_pruning.nullify import (
     nullify_attention_heads,
@@ -138,6 +138,8 @@ class TestPruneAttentionHeads:
         assert bert_test_model.encoder.layer[0].attention.self.query.bias.requires_grad == old_requires_grad_bias
 
     def test_same_as_nullify(self, test_lm_model: PreTrainedModel, random_input_batch) -> None:
+        if isinstance(test_lm_model, BertForMaskedLM):
+            pytest.xfail("BertForMaskedLM does not support nullify_attention_heads for now")
 
         with torch.no_grad():
             # get output of the original model

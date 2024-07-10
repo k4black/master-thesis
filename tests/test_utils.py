@@ -1,7 +1,7 @@
 import pytest
 import torch
 from torch import nn
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from adaptive_pruning.utils import (
     count_nonzero_parameters,
@@ -86,104 +86,48 @@ class TestFormatNumber:
 
 
 class TestMeasureModels:
-    def test_no_pruning_llama_test_model(self, llama_lm_test_model: PreTrainedModel) -> None:
-        LLAMA_TEST_MODEL_SIZE = 598_336
-        LLAMA_TEST_MODEL_BASE_SIZE = 336_192
-        LLAMA_TEST_MODEL_LAYER_SIZE = 36_992
-        assert (
-            LLAMA_TEST_MODEL_SIZE
-            > LLAMA_TEST_MODEL_BASE_SIZE
-            > LLAMA_TEST_MODEL_LAYER_SIZE * len(llama_lm_test_model.base_model.layers)
-        )
+    LLAMA_TEST_MODEL_SIZE = 598_336
+    LLAMA_TEST_MODEL_BASE_SIZE = 336_192
+    LLAMA_TEST_MODEL_LAYER_SIZE = 36_992
 
-        # original_model_stats
-        original_model_stats = measure_original_model_stats(llama_lm_test_model)
-        assert original_model_stats["total"] == LLAMA_TEST_MODEL_SIZE
-        assert original_model_stats["base"] == LLAMA_TEST_MODEL_BASE_SIZE
-        for i, layer in enumerate(llama_lm_test_model.base_model.layers):
-            assert original_model_stats[f"layer_{i}"] == LLAMA_TEST_MODEL_LAYER_SIZE
+    def test_measure_model_stats_original(
+        self, llama_lm_test_model: PreTrainedModel, llama_test_tokenizer: PreTrainedTokenizer
+    ):
+        stats, total_stats = measure_model_stats(llama_lm_test_model, llama_test_tokenizer, print_results=True)
+        assert "total" in stats
+        assert total_stats["params"] == self.LLAMA_TEST_MODEL_SIZE
 
-        # with original_model_stats provided
-        sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, original_model_stats)
-        assert sparsity_stats["total"]["num_original_parameters"] == LLAMA_TEST_MODEL_SIZE
-        assert sparsity_stats["total"]["num_parameters"] == LLAMA_TEST_MODEL_SIZE
-        assert sparsity_stats["total"]["num_zero_parameters"] == 0
-        assert sparsity_stats["total"]["num_nonzero_parameters"] == LLAMA_TEST_MODEL_SIZE
-        assert sparsity_stats["base"]["num_original_parameters"] == LLAMA_TEST_MODEL_BASE_SIZE
-        assert sparsity_stats["base"]["num_parameters"] == LLAMA_TEST_MODEL_BASE_SIZE
-        assert sparsity_stats["base"]["num_zero_parameters"] == 0
-        assert sparsity_stats["base"]["num_nonzero_parameters"] == LLAMA_TEST_MODEL_BASE_SIZE
-        for i, layer in enumerate(llama_lm_test_model.base_model.layers):
-            assert sparsity_stats[f"layer_{i}"]["num_original_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE
-            assert sparsity_stats[f"layer_{i}"]["percentage_original_pruned"] == 0.0
-            assert sparsity_stats[f"layer_{i}"]["num_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE
-            assert sparsity_stats[f"layer_{i}"]["num_zero_parameters"] == 0
-            assert sparsity_stats[f"layer_{i}"]["num_nonzero_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE
+    def test_measure_model_stats_with_pruning(
+        self, llama_lm_test_model: PreTrainedModel, llama_test_tokenizer: PreTrainedTokenizer
+    ):
+        hidden_size = llama_lm_test_model.config.hidden_size
+        llama_lm_test_model.base_model.layers[1].mlp.up_proj.weight.data = torch.empty(10, hidden_size)
+        llama_lm_test_model.base_model.layers[1].mlp.gate_proj.weight.data = torch.empty(10, hidden_size)
+        llama_lm_test_model.base_model.layers[1].mlp.down_proj.weight.data = torch.empty(hidden_size, 10)
+        stats, total_stats = measure_model_stats(llama_lm_test_model, llama_test_tokenizer, print_results=True)
+        assert stats[1]["ffn_n_params"] == hidden_size * 10 * 3
+        assert total_stats["params"] < self.LLAMA_TEST_MODEL_SIZE
 
-        # without original_model_stats provided
-        sparsity_stats = measure_pruned_model_stats(llama_lm_test_model)
-        assert sparsity_stats["total"]["num_original_parameters"] is None
-        assert sparsity_stats["total"]["num_parameters"] == LLAMA_TEST_MODEL_SIZE
-
-    def test_pruning_llama_test_model(self, llama_lm_test_model: PreTrainedModel) -> None:
-        LLAMA_TEST_MODEL_SIZE = 598_336
-        LLAMA_TEST_MODEL_BASE_SIZE = 336_192
-        LLAMA_TEST_MODEL_LAYER_SIZE = 36_992
-        assert (
-            LLAMA_TEST_MODEL_SIZE
-            > LLAMA_TEST_MODEL_BASE_SIZE
-            > LLAMA_TEST_MODEL_LAYER_SIZE * len(llama_lm_test_model.base_model.layers)
-        )
-
-        # original_model_stats
-        original_model_stats = measure_original_model_stats(llama_lm_test_model)
-        assert original_model_stats["total"] == LLAMA_TEST_MODEL_SIZE
-        assert original_model_stats["base"] == LLAMA_TEST_MODEL_BASE_SIZE
-        assert original_model_stats["layer_0"] == LLAMA_TEST_MODEL_LAYER_SIZE
-
-        # nullify some weights
+    def test_measure_model_stats_with_zeroing(
+        self, llama_lm_test_model: PreTrainedModel, llama_test_tokenizer: PreTrainedTokenizer
+    ):
+        hidden_size = llama_lm_test_model.config.hidden_size
         llama_lm_test_model.base_model.layers[0].self_attn.q_proj.weight.data.fill_(0)
-        llama_lm_test_model.base_model.layers[1].self_attn.q_proj.weight.data.fill_(0)
-        llama_lm_test_model.base_model.layers[1].self_attn.o_proj.weight.data = torch.empty(0, 0)
+        stats, total_stats = measure_model_stats(llama_lm_test_model, llama_test_tokenizer, print_results=True)
+        assert stats[0]["attn_heads_n_zero_params"] == hidden_size * hidden_size
+        assert total_stats["zero_params"] >= hidden_size * hidden_size
 
-        # with original_model_stats provided
-        sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, original_model_stats)
-        assert sparsity_stats["total"]["num_original_parameters"] == LLAMA_TEST_MODEL_SIZE
-        assert sparsity_stats["total"]["num_parameters"] == LLAMA_TEST_MODEL_SIZE - 64 * 64
-        assert sparsity_stats["total"]["num_zero_parameters"] == 64 * 64 * 2
-        assert sparsity_stats["total"]["percentage_original_pruned"] == 64 * 64 / LLAMA_TEST_MODEL_SIZE * 100
-        assert sparsity_stats["total"]["percentage_zero"] == 64 * 64 * 2 / (LLAMA_TEST_MODEL_SIZE - 64 * 64) * 100
-
-        assert sparsity_stats["layer_0"]["num_original_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE
-        assert sparsity_stats["layer_0"]["num_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE
-        assert sparsity_stats["layer_0"]["num_zero_parameters"] == 64 * 64
-        assert sparsity_stats["layer_0"]["percentage_original_pruned"] == 0.0
-        assert sparsity_stats["layer_0"]["percentage_zero"] == 64 * 64 / LLAMA_TEST_MODEL_LAYER_SIZE * 100
-
-        assert sparsity_stats["layer_1"]["num_original_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE
-        assert sparsity_stats["layer_1"]["num_parameters"] == LLAMA_TEST_MODEL_LAYER_SIZE - 64 * 64
-        assert sparsity_stats["layer_1"]["num_zero_parameters"] == 64 * 64
-        assert sparsity_stats["layer_1"]["percentage_original_pruned"] == 64 * 64 / LLAMA_TEST_MODEL_LAYER_SIZE * 100
-        assert sparsity_stats["layer_1"]["percentage_zero"] == 64 * 64 / (LLAMA_TEST_MODEL_LAYER_SIZE - 64 * 64) * 100
-
-    # def test_print_measure_table(self, llama_lm_test_model: PreTrainedModel, capsys: pytest.CaptureFixture) -> None:
-    #     # original_model_stats
-    #     original_model_stats = measure_original_model_stats(llama_lm_test_model)
-    #     # nullify some weights
-    #     llama_lm_test_model.base_model.layers[0].self_attn.q_proj.weight.data.fill_(0)
-    #     llama_lm_test_model.base_model.layers[1].self_attn.q_proj.weight.data.fill_(0)
-    #     llama_lm_test_model.base_model.layers[1].self_attn.o_proj.weight.data = torch.empty(0, 0)
-    #     # with original_model_stats provided
-    #     sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, original_model_stats)
-    #     print_measure_table(sparsity_stats)
-    #     captured = capsys.readouterr()
-    #     assert 'Module' in captured.out
-    #     assert '%Pruned' in captured.out
-    #     # ...
-
-    #     sparsity_stats = measure_pruned_model_stats(llama_lm_test_model, None)
-    #     print_measure_table(sparsity_stats)
-    #     captured = capsys.readouterr()
-    #     assert 'Module' in captured.out
-    #     assert '%Pruned' in captured.out
-    #     # ...
+    def test_measure_model_stats_comparison(
+        self, llama_lm_test_model: PreTrainedModel, llama_test_tokenizer: PreTrainedTokenizer
+    ):
+        hidden_size = llama_lm_test_model.config.hidden_size
+        original_stats, _ = measure_model_stats(llama_lm_test_model, llama_test_tokenizer, print_results=False)
+        llama_lm_test_model.base_model.layers[1].mlp.up_proj.weight.data = torch.empty(10, hidden_size)
+        llama_lm_test_model.base_model.layers[1].mlp.gate_proj.weight.data = torch.empty(10, hidden_size)
+        llama_lm_test_model.base_model.layers[1].mlp.down_proj.weight.data = torch.empty(hidden_size, 10)
+        llama_lm_test_model.base_model.layers[0].self_attn.q_proj.weight.data.fill_(0)
+        pruned_stats, pruned_total_stats = measure_model_stats(
+            llama_lm_test_model, llama_test_tokenizer, original_model_stats=original_stats, print_results=True
+        )
+        assert pruned_stats[1]["ffn_n_params"] == hidden_size * 10 * 3
+        assert pruned_total_stats["params"] < self.LLAMA_TEST_MODEL_SIZE
