@@ -208,15 +208,13 @@ def _nullify_linear_layer(layer: nn.Linear, index_to_nullify: torch.LongTensor, 
             layer.bias.requires_grad = _original_requires_grad
 
 
-def nullify_hidden_state(model: PreTrainedModel, neurons_to_nullify: list[int]) -> None:
+def nullify_hidden_states(model: PreTrainedModel, neurons_to_nullify: list[int]) -> None:
     """
     Nullify specific neurons from all hidden states along the model, including embeddings layer
 
     :param model: The transformers pytorch model to nullify
     :param neurons_to_nullify: List of neurons in dimensions to nullify from the add hidden states along the model
     """
-    print(model)
-
     base_model, architecture = model.base_model, model.config.model_type
     hidden_states_to_nullify = torch.LongTensor(list(set(neurons_to_nullify)))
 

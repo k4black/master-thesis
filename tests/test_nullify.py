@@ -14,7 +14,7 @@ from adaptive_pruning.nullify import (
     nullify_attention_layers,
     nullify_ffn_layers,
     nullify_ffn_neurons,
-    nullify_hidden_state,
+    nullify_hidden_states,
 )
 from adaptive_pruning.utils import count_zero_parameters
 
@@ -151,24 +151,18 @@ class TestNullifyUtils:
 
 
 class TestNullifyAttentionHeads:
-    def test_differs_from_original(
-        self, test_lm_model: PreTrainedModel, random_input_batch: dict[str, torch.Tensor]
-    ) -> None:
+    def test_differs_from_original(self, test_lm_model: PreTrainedModel, random_batch: dict[str, torch.Tensor]) -> None:
         # set params
         heads_to_nullify = {0: [1], 1: [1]}
         head_size = test_lm_model.config.hidden_size // test_lm_model.config.num_attention_heads
 
         # get original output
         num_zeros_in_model = count_zero_parameters(test_lm_model)
-        original_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        original_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # nullify heads
         nullify_attention_heads(test_lm_model, heads_to_nullify)
-        nullified_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        nullified_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # check if the outputs are different
         assert count_zero_parameters(test_lm_model) > num_zeros_in_model, "Number of zero parameters should increase"
@@ -178,23 +172,17 @@ class TestNullifyAttentionHeads:
 
 
 class TestNullifyAttentionLayers:
-    def test_differs_from_original(
-        self, test_lm_model: PreTrainedModel, random_input_batch: dict[str, torch.Tensor]
-    ) -> None:
+    def test_differs_from_original(self, test_lm_model: PreTrainedModel, random_batch: dict[str, torch.Tensor]) -> None:
         # set params
         layers_to_nullify = [0, 1]
 
         # get original output
         num_zeros_in_model = count_zero_parameters(test_lm_model)
-        original_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        original_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # nullify layers
         nullify_attention_layers(test_lm_model, layers_to_nullify)
-        nullified_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        nullified_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # check if the outputs are different
         assert count_zero_parameters(test_lm_model) > num_zeros_in_model, "Number of zero parameters should increase"
@@ -204,23 +192,17 @@ class TestNullifyAttentionLayers:
 
 
 class TestNullifyFfnNeurons:
-    def test_differs_from_original(
-        self, test_lm_model: PreTrainedModel, random_input_batch: dict[str, torch.Tensor]
-    ) -> None:
+    def test_differs_from_original(self, test_lm_model: PreTrainedModel, random_batch: dict[str, torch.Tensor]) -> None:
         # set params
         neurons_to_nullify = {0: [1, 10, 11], 1: [0, 22, 1]}
 
         # get original output
         num_zeros_in_model = count_zero_parameters(test_lm_model)
-        original_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        original_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # nullify neurons
         nullify_ffn_neurons(test_lm_model, neurons_to_nullify)
-        nullified_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        nullified_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # check if the outputs are different
         assert count_zero_parameters(test_lm_model) > num_zeros_in_model, "Number of zero parameters should increase"
@@ -230,23 +212,17 @@ class TestNullifyFfnNeurons:
 
 
 class TestNullifyFfnLayers:
-    def test_differs_from_original(
-        self, test_lm_model: PreTrainedModel, random_input_batch: dict[str, torch.Tensor]
-    ) -> None:
+    def test_differs_from_original(self, test_lm_model: PreTrainedModel, random_batch: dict[str, torch.Tensor]) -> None:
         # set params
         layers_to_nullify = [0, 1]
 
         # get original output
         num_zeros_in_model = count_zero_parameters(test_lm_model)
-        original_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        original_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # nullify layers
         nullify_ffn_layers(test_lm_model, layers_to_nullify)
-        nullified_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        nullified_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # check if the outputs are different
         assert count_zero_parameters(test_lm_model) > num_zeros_in_model, "Number of zero parameters should increase"
@@ -256,9 +232,7 @@ class TestNullifyFfnLayers:
 
 
 class TestNullifyHiddenState:
-    def test_differs_from_original(
-        self, test_lm_model: PreTrainedModel, random_input_batch: dict[str, torch.Tensor]
-    ) -> None:
+    def test_differs_from_original(self, test_lm_model: PreTrainedModel, random_batch: dict[str, torch.Tensor]) -> None:
         if isinstance(test_lm_model, BertForMaskedLM):
             pytest.xfail("BertForMaskedLM is not supported yet")
 
@@ -267,15 +241,11 @@ class TestNullifyHiddenState:
 
         # get original output
         num_zeros_in_model = count_zero_parameters(test_lm_model)
-        original_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        original_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # nullify hidden states
-        nullify_hidden_state(test_lm_model, hidden_states_to_nullify)
-        nullified_last_hidden_state = test_lm_model(
-            random_input_batch["input_ids"], random_input_batch["attention_mask"]
-        )[0]
+        nullify_hidden_states(test_lm_model, hidden_states_to_nullify)
+        nullified_last_hidden_state = test_lm_model(**random_batch)[0]
 
         # check if the outputs are different
         assert count_zero_parameters(test_lm_model) > num_zeros_in_model, "Number of zero parameters should increase"

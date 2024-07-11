@@ -179,7 +179,21 @@ def simple_mnli_dataset() -> Dataset:
 
 
 @pytest.fixture
-def random_input_batch() -> dict[str, torch.Tensor]:
+def random_batch() -> dict[str, torch.Tensor]:
+    """
+    Returns a dictionary with random input_ids, attention_mask and labels tensors.
+    :return: [4, 10] input_ids, [4, 10] attention_mask, [4, 10] labels
+    """
+    import torch
+
+    return {
+        "input_ids": torch.randint(0, 100, (4, 10)),
+        "attention_mask": torch.randint(0, 2, (4, 10)),
+    }
+
+
+@pytest.fixture
+def random_clf_batch() -> dict[str, torch.Tensor]:
     """
     Returns a dictionary with random input_ids, attention_mask and label tensors.
     :return: [4, 10] input_ids, [4, 10] attention_mask, [4] label
@@ -190,6 +204,21 @@ def random_input_batch() -> dict[str, torch.Tensor]:
         "input_ids": torch.randint(0, 100, (4, 10)),
         "attention_mask": torch.randint(0, 2, (4, 10)),
         "label": torch.randint(0, 3, (4,)),
+    }
+
+
+@pytest.fixture
+def random_lm_batch() -> dict[str, torch.Tensor]:
+    """
+    Returns a dictionary with random input_ids, attention_mask and labels tensors.
+    :return: [4, 10] input_ids, [4, 10] attention_mask, [4, 10] labels
+    """
+    import torch
+
+    return {
+        "input_ids": torch.randint(0, 100, (4, 10)),
+        "attention_mask": torch.randint(0, 2, (4, 10)),
+        "labels": torch.randint(0, 100, (4, 10)),
     }
 
 

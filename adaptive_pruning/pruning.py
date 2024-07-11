@@ -3,6 +3,7 @@ import warnings
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
+from transformers.models.bert.modeling_bert import BertOnlyMLMHead
 from transformers.pytorch_utils import prune_linear_layer
 
 
@@ -252,10 +253,32 @@ def prune_hidden_states(model: PreTrainedModel, hidden_states_to_prune: list[int
     :param model: The transformers pytorch model to prune
     :param hidden_states_to_prune: List of neurons in dimensions to prune from the add hidden states along the model
     """
+    print(model)
     base_model, architecture = model.base_model, model.config.model_type
     hidden_states_to_prune = torch.LongTensor(hidden_states_to_prune)
 
     if architecture == "bert":
+        if hasattr(model, "cls"):
+            if isinstance(model.cls, BertOnlyMLMHead):
+                model.cls.predictions.transform.dense = _prune_linear_layer(
+                    model.cls.predictions.transform.dense,
+                    hidden_states_to_prune,
+                    input_dim=True,
+                )
+                model.cls.predictions.transform.dense = _prune_linear_layer(
+                    model.cls.predictions.transform.dense,
+                    hidden_states_to_prune,
+                    input_dim=False,
+                )
+                model.cls.predictions.transform.LayerNorm = _prune_layer_norm(
+                    model.cls.predictions.transform.LayerNorm,
+                    hidden_states_to_prune,
+                )
+                model.cls.predictions.decoder = _prune_linear_layer(
+                    model.cls.predictions.decoder,
+                    hidden_states_to_prune,
+                    input_dim=True,
+                )
         base_model.embeddings.word_embeddings = _prune_embedding_layer_hidden_states(
             base_model.embeddings.word_embeddings,
             hidden_states_to_prune,
@@ -316,20 +339,21 @@ def prune_hidden_states(model: PreTrainedModel, hidden_states_to_prune: list[int
                 hidden_states_to_prune,
             )
         # pooler
-        base_model.pooler.dense = _prune_linear_layer(
-            base_model.pooler.dense,
-            hidden_states_to_prune,
-            input_dim=False,
-        )
-        base_model.pooler.dense = _prune_linear_layer(
-            base_model.pooler.dense,
-            hidden_states_to_prune,
-            input_dim=True,
-        )
+        if hasattr(base_model, "pooler") and base_model.pooler is not None:
+            base_model.pooler.dense = _prune_linear_layer(
+                base_model.pooler.dense,
+                hidden_states_to_prune,
+                input_dim=False,
+            )
+            base_model.pooler.dense = _prune_linear_layer(
+                base_model.pooler.dense,
+                hidden_states_to_prune,
+                input_dim=True,
+            )
     elif architecture == "llama":
-        if hasattr(base_model, "lm_head"):
-            base_model.lm_head = _prune_linear_layer(
-                base_model.lm_head,
+        if hasattr(model, "lm_head"):
+            model.lm_head = _prune_linear_layer(
+                model.lm_head,
                 hidden_states_to_prune,
                 input_dim=True,
             )
