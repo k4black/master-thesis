@@ -18,18 +18,13 @@ from adaptive_pruning.importance import (
     info_to_max,
     info_to_mean,
     info_to_minus_entropy,
-)
-from adaptive_pruning.pruning import (
-    prune_attention_heads,
-    prune_attention_layers,
-    prune_ffn_layers,
-    prune_ffn_neurons,
-    select_to_prune_attention_heads,
+    select_attention_heads,
     select_to_prune_attention_layers,
     select_to_prune_ffn_layers,
     select_to_prune_ffn_neurons,
     select_to_prune_hidden_states,
 )
+from adaptive_pruning.pruning import prune_attention_heads, prune_attention_layers, prune_ffn_layers, prune_ffn_neurons
 from adaptive_pruning.utils import (
     count_flops_macs_params,
     measure_model_stats,
@@ -340,7 +335,7 @@ def main(
         attention_layers_pruning_ratio,
     )
     head_size = config.hidden_size // config.num_attention_heads
-    attention_heads_to_prune = select_to_prune_attention_heads(
+    attention_heads_to_prune = select_attention_heads(
         components_importance.attention_heads_importance,
         attention_heads_pruning_ratio,
         uniform_among_layers=do_prune_attention_heads_uniform,

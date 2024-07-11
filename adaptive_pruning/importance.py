@@ -436,3 +436,215 @@ def info_to_minus_entropy(
     components_info: ComponentsInfo,
 ) -> ComponentsImportance:
     return ComponentsImportance(*[(i * torch.log(i)).sum(dim=0) for i in components_info])
+
+
+def select_attention_heads(
+    importance_scores: torch.Tensor,
+    percent_heads_to_prune: float,
+    uniform_among_layers: bool = False,
+    key_value_group_size: int = 1,
+    round_to_heads: int = 1,
+    keep_at_least_one_head: bool = True,
+) -> dict[int, list[int]]:
+    """
+    Select least-k attention heads based on the importance scores.
+    Keep at least 1 attention head per layer
+
+    Note: prune heads regardless of the layer, so remove the least important head among the whole model
+    i.e. can prune all heads for layer 1 and none in layer 2
+
+    :param importance_scores: The importance scores of the attention heads [num_hidden_layers, num_attention_heads]
+    :param percent_heads_to_prune: The percentage of attention heads to keep
+    :param uniform_among_layers: If True, prune the same number of heads from each layer
+    :param key_value_group_size: The number of attention heads to group together for key and value projections; 1 means no grouping
+    :param round_to_heads: The number of heads to group together for pruning
+        TODO: Think to group K or QV heads. For now, round grouped heads number
+    :param keep_at_least_one_head: If True, keep at least 1 head per layer
+    :return: A dictionary with the layer indices as keys and a list of head indices to prune as values
+    """
+    assert 0 <= percent_heads_to_prune <= 1, "percent_heads_to_prune should be in [0, 1]"
+    assert (
+        1 <= key_value_group_size <= importance_scores.size(1)
+    ), "key_value_group_size should be in [1, num_attention_heads]"
+
+    # shrink the importance scores to the grouped size by averaging
+    if key_value_group_size != 1:
+        importance_scores = importance_scores.view(
+            importance_scores.size(0), importance_scores.size(1) // key_value_group_size, key_value_group_size
+        ).mean(dim=-1)
+
+    heads_to_prune = {}
+    num_layers, num_heads = importance_scores.size()
+
+    if uniform_among_layers:
+        num_heads_to_prune = int(num_heads * percent_heads_to_prune)
+        num_heads_to_prune = round(num_heads_to_prune / round_to_heads) * round_to_heads
+
+        for layer_index in range(num_layers):
+            # sort heads by importance
+            importance_scores_layer = importance_scores[layer_index]
+            _, sorted_indices = importance_scores_layer.sort()
+            heads_to_prune_layer = sorted_indices[:num_heads_to_prune].tolist()
+            heads_to_prune[layer_index] = heads_to_prune_layer
+
+    else:
+        num_heads_to_prune = int(num_layers * num_heads * percent_heads_to_prune)
+
+        # sort heads by importance
+        importance_scores_flatten = importance_scores.view(-1)
+        _, sorted_indices = importance_scores_flatten.sort()
+        heads_to_prune_flatten = sorted_indices[:num_heads_to_prune]
+
+        # convert to layer-head indices
+        for head_index in heads_to_prune_flatten:
+            head_index = int(head_index.item())
+            layer_index = head_index // num_heads
+            head_index = head_index % num_heads
+            heads_to_prune.setdefault(layer_index, []).append(head_index)
+
+        # round to the nearest round_to_heads for each layer (drop excess heads)
+        for layer, heads in heads_to_prune.items():
+            num_heads_to_prune_layer = len(heads)
+            num_heads_to_prune_layer = round(num_heads_to_prune_layer / round_to_heads) * round_to_heads
+            heads_to_prune[layer] = heads[:num_heads_to_prune_layer]
+
+    # keep at least 1 head per layer (or round_to_heads), remove unused heads_to_prune lists
+    if keep_at_least_one_head:
+        for layer in list(heads_to_prune.keys()):
+            if len(heads_to_prune[layer]) == num_heads:
+                heads_to_prune[layer] = heads_to_prune[layer][: num_heads - round_to_heads]
+            if len(heads_to_prune[layer]) == 0:
+                del heads_to_prune[layer]
+
+    # expand the grouped heads to the original size
+    if key_value_group_size != 1:
+        heads_to_prune_expanded = {}
+        for layer, heads in heads_to_prune.items():
+            heads_expanded = [i * key_value_group_size + j for i in heads for j in range(key_value_group_size)]
+            heads_to_prune_expanded[layer] = heads_expanded
+        heads_to_prune = heads_to_prune_expanded
+
+    return heads_to_prune
+
+
+def select_to_prune_attention_layers(
+    importance_scores: torch.Tensor,
+    percent_layers_to_prune: float,
+) -> list[int]:
+    """
+    Select least-k attention layers based on the importance scores.
+
+    :param importance_scores: The importance scores of the attention layers [num_hidden_layers]
+    :param percent_layers_to_prune: The percentage of attention layers to keep
+    :return: A list of layer indices to prune
+    """
+    assert 0 <= percent_layers_to_prune <= 1, "percent_layers_to_prune should be in [0, 1]"
+
+    num_layers = importance_scores.size(0)
+    num_layers_to_prune = int(num_layers * percent_layers_to_prune)
+
+    _, sorted_indices = importance_scores.sort()
+    layers_to_prune = sorted_indices[:num_layers_to_prune].tolist()
+
+    return layers_to_prune
+
+
+def select_to_prune_ffn_neurons(
+    importance_scores: torch.Tensor,
+    percent_neurons_to_prune: float,
+    uniform_among_layers: bool = False,
+    round_to: int = 1,
+) -> dict[int, list[int]]:
+    """
+    Select least-k feed forward neurons based on the importance scores.
+
+    :param importance_scores: The importance scores of the feed forward neurons [num_hidden_layers, intermediate_size]
+    :param percent_neurons_to_prune: The percentage of feed forward neurons to keep
+    :param uniform_among_layers: If True, prune the same number of neurons from each layer
+    :param round_to: The number of neurons to group together for pruning (round to the nearest round_to) for gpu opts
+    :return: A dictionary with the layer indices as keys and a list of neuron indices to prune as values
+    """
+    assert 0 <= percent_neurons_to_prune <= 1, "percent_neurons_to_prune should be in [0, 1]"
+
+    neurons_to_prune = {}
+    num_layers, num_neurons = importance_scores.size()
+
+    if uniform_among_layers:
+        num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
+        num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
+
+        for layer_index in range(num_layers):
+            # sort neurons by importance
+            importance_scores_layer = importance_scores[layer_index]
+            _, sorted_indices = importance_scores_layer.sort()
+            neurons_to_prune_layer = sorted_indices[:num_neurons_to_prune].tolist()
+            neurons_to_prune[layer_index] = neurons_to_prune_layer
+
+    else:
+        num_neurons_to_prune = int(num_layers * num_neurons * percent_neurons_to_prune)
+
+        # sort neurons by importance
+        importance_scores_flatten = importance_scores.view(-1)
+        _, sorted_indices = importance_scores_flatten.sort()
+        neurons_to_prune_flatten = sorted_indices[:num_neurons_to_prune]
+
+        # convert to layer-neuron indices
+        for neuron_index in neurons_to_prune_flatten:
+            neuron_index = int(neuron_index.item())
+            layer_index = neuron_index // num_neurons
+            neuron_index = neuron_index % num_neurons
+            neurons_to_prune.setdefault(layer_index, []).append(neuron_index)
+
+        # round to the nearest round_to for each layer (drop excess neurons)
+        for layer, neurons in neurons_to_prune.items():
+            num_neurons_to_prune_layer = len(neurons)
+            num_neurons_to_prune_layer = round(num_neurons_to_prune_layer / round_to) * round_to
+            neurons_to_prune[layer] = neurons[:num_neurons_to_prune_layer]
+
+    return neurons_to_prune
+
+
+def select_to_prune_ffn_layers(
+    importance_scores: torch.Tensor,
+    percent_layers_to_prune: float,
+) -> list[int]:
+    """
+    Select least-k feed forward layers based on the importance scores.
+
+    :param importance_scores: The importance scores of the feed forward layers [num_hidden_layers]
+    :param percent_layers_to_prune: The percentage of feed forward layers to keep
+    :return: A list of layer indices to prune
+    """
+    assert 0 <= percent_layers_to_prune <= 1, "percent_layers_to_prune should be in [0, 1]"
+
+    num_layers = importance_scores.size(0)
+    num_layers_to_prune = int(num_layers * percent_layers_to_prune)
+
+    _, sorted_indices = importance_scores.sort()
+    layers_to_prune = sorted_indices[:num_layers_to_prune].tolist()
+
+    return layers_to_prune
+
+
+def select_to_prune_hidden_states(
+    importance_scores: torch.Tensor,
+    percent_neurons_to_prune: float,
+    round_to: int = 1,
+) -> list[int]:
+    """
+    Select least-k neurons based on the importance scores.
+
+    :param importance_scores: The importance scores of the hidden states [hidden_size]
+    :param percent_neurons_to_prune: The percentage of hidden states to keep
+    :return: A list of neuron indices to prune
+    """
+    assert 0 <= percent_neurons_to_prune <= 1, "percent_neurons_to_prune should be in [0, 1]"
+
+    num_neurons = importance_scores.size(0)
+    num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
+    num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
+
+    _, sorted_indices = importance_scores.sort()
+    neurons_to_prune = sorted_indices[:num_neurons_to_prune].tolist()
+
+    return neurons_to_prune

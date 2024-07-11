@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from typing import TYPE_CHECKING, Any
 
 import tabulate
@@ -171,9 +172,12 @@ def measure_model_stats(
         sys.stdout.flush()
 
     # Calculate total flops, macs, params, zero_params
-    total_flops, total_macs, total_params, total_zero_params = count_flops_macs_params(
-        model, tokenizer, print_results=False
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # ignore FutureWarning on `truncation_strategy`
+
+        total_flops, total_macs, total_params, total_zero_params = count_flops_macs_params(
+            model, tokenizer, print_results=False
+        )
 
     return (
         sparsity_stats,

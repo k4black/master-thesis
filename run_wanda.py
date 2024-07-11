@@ -67,9 +67,9 @@ def main(
     pruning_ratio: float = 0.5,
     num_samples: int = 128,
     sparsity_type: Optional[str] = "unstructured",  # ["unstructured", "4:8", "2:4"]
-    prune_method: Optional[
-        str
-    ] = "wanda",  # ["magnitude", "wanda", "sparsegpt", "ablate_mag_seq", "ablate_wanda_seq", "ablate_mag_iter", "ablate_wanda_iter", "search"]
+    # ["magnitude", "wanda", "sparsegpt", "ablate_mag_seq", "ablate_wanda_seq",
+    # "ablate_mag_iter", "ablate_wanda_iter", "search"]
+    prune_method: Optional[str] = "wanda",
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,

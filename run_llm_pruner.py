@@ -7,7 +7,6 @@ from typing import Optional
 import torch
 import typer
 from dotenv import load_dotenv
-from neptune.types import File
 from transformers import AutoTokenizer
 
 
@@ -31,14 +30,7 @@ else:
     from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 from adaptive_pruning.utils import measure_model_stats
-from utils import (
-    create_neptune_run,
-    evaluate_model,
-    fix_neptune_overflow_recursively,
-    neptune_record_pruned_model,
-    save_model_tokenizer,
-    set_random_seed,
-)
+from utils import create_neptune_run, evaluate_model, neptune_record_pruned_model, save_model_tokenizer, set_random_seed
 
 
 load_dotenv()  # take environment variables

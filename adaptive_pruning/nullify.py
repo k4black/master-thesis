@@ -20,8 +20,11 @@ def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, 
             for name in ["query", "key", "value"]:
                 param = model.encoder.layer[layer].attention.self.__getattr__(name)
                 for head_index in heads:
-                    param.weight[head_index * head_size : (head_index + 1) * head_size] = 0
-                    param.bias[head_index * head_size : (head_index + 1) * head_size] = 0
+                    _nullify_linear_layer(
+                        param,
+                        torch.arange(head_index * head_size, (head_index + 1) * head_size, dtype=torch.long),
+                        input_dim=False,
+                    )
 
     elif architecture == "llama":
         num_heads_per_group = model.config.num_attention_heads // model.config.num_key_value_heads
@@ -31,14 +34,28 @@ def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, 
             heads_not_grouped = [i * num_heads_per_group + j for i in heads_grouped for j in range(num_heads_per_group)]
             # q and out are full sized
             for head_index in heads_not_grouped:
-                model.layers[layer].self_attn.q_proj.weight[head_index * head_size : (head_index + 1) * head_size] = 0
-                model.layers[layer].self_attn.o_proj.weight[
-                    :, head_index * head_size : (head_index + 1) * head_size
-                ] = 0
+                _nullify_linear_layer(
+                    model.layers[layer].self_attn.q_proj,
+                    torch.arange(head_index * head_size, (head_index + 1) * head_size, dtype=torch.long),
+                    input_dim=False,
+                )
+                _nullify_linear_layer(
+                    model.layers[layer].self_attn.o_proj,
+                    torch.arange(head_index * head_size, (head_index + 1) * head_size, dtype=torch.long),
+                    input_dim=True,
+                )
             # k and v are grouped
             for head_index in heads_grouped:
-                model.layers[layer].self_attn.k_proj.weight[head_index * head_size : (head_index + 1) * head_size] = 0
-                model.layers[layer].self_attn.v_proj.weight[head_index * head_size : (head_index + 1) * head_size] = 0
+                _nullify_linear_layer(
+                    model.layers[layer].self_attn.k_proj,
+                    torch.arange(head_index * head_size, (head_index + 1) * head_size, dtype=torch.long),
+                    input_dim=False,
+                )
+                _nullify_linear_layer(
+                    model.layers[layer].self_attn.v_proj,
+                    torch.arange(head_index * head_size, (head_index + 1) * head_size, dtype=torch.long),
+                    input_dim=False,
+                )
     else:
         raise ValueError(f"Unsupported architecture: {architecture}")
 
@@ -82,23 +99,33 @@ def nullify_ffn_neurons(model: PreTrainedModel, neurons_to_nullify: dict[int, li
 
     if architecture == "bert":
         for layer_index, neurons in neurons_to_nullify.items():
-            intermediate = model.encoder.layer[layer_index].intermediate.dense
-            intermediate.weight[neurons, :] = 0
-            intermediate.bias[neurons] = 0
-            output = model.encoder.layer[layer_index].output.dense
-            output.weight[:, neurons] = 0
+            _nullify_linear_layer(
+                model.encoder.layer[layer_index].intermediate.dense,
+                torch.tensor(neurons, dtype=torch.long),
+                input_dim=False,
+            )
+            _nullify_linear_layer(
+                model.encoder.layer[layer_index].output.dense,
+                torch.tensor(neurons, dtype=torch.long),
+                input_dim=True,
+            )
     elif architecture == "llama":
         for layer_index, neurons in neurons_to_nullify.items():
-            gate_proj = model.layers[layer_index].mlp.gate_proj
-            gate_proj.weight[neurons, :] = 0
-            if gate_proj.bias is not None:
-                gate_proj.bias[neurons] = 0
-            up_proj = model.layers[layer_index].mlp.up_proj
-            up_proj.weight[neurons, :] = 0
-            if up_proj.bias is not None:
-                up_proj.bias[neurons] = 0
-            down_proj = model.layers[layer_index].mlp.down_proj
-            down_proj.weight[:, neurons] = 0
+            _nullify_linear_layer(
+                model.layers[layer_index].mlp.gate_proj,
+                torch.tensor(neurons, dtype=torch.long),
+                input_dim=False,
+            )
+            _nullify_linear_layer(
+                model.layers[layer_index].mlp.up_proj,
+                torch.tensor(neurons, dtype=torch.long),
+                input_dim=False,
+            )
+            _nullify_linear_layer(
+                model.layers[layer_index].mlp.down_proj,
+                torch.tensor(neurons, dtype=torch.long),
+                input_dim=True,
+            )
     else:
         raise ValueError(f"Unsupported architecture: {architecture}")
 
@@ -134,16 +161,51 @@ def nullify_ffn_layers(model: PreTrainedModel, layers_to_nullify: list[int]) -> 
         raise ValueError(f"Unsupported architecture: {architecture}")
 
 
-def _nullify_embedding_layer(layer: nn.Embedding, index: torch.LongTensor) -> None:
-    index = index.to(layer.weight.device)
-    layer.weight[:, index] = 0
+def _nullify_embedding_layer_hidden_states(layer: nn.Embedding, index_to_nullify: torch.LongTensor) -> None:
+    index_to_nullify = index_to_nullify.to(layer.weight.device)
+    _original_requires_grad = layer.weight.requires_grad
+    layer.weight.requires_grad = False
+    layer.weight[:, index_to_nullify] = 0
+    layer.weight.requires_grad = _original_requires_grad
 
 
-def _nullify_layer_norm(layer: nn.LayerNorm, index: torch.LongTensor) -> None:
-    index = index.to(layer.weight.device)
-    layer.weight[index] = 0
-    if layer.bias is not None:
-        layer.bias[index] = 0
+def _nullify_layer_norm(layer: nn.LayerNorm, index_to_nullify: torch.LongTensor) -> None:
+    index_to_nullify = index_to_nullify.to(layer.weight.device)
+    _original_requires_grad = layer.weight.requires_grad
+    layer.weight.requires_grad = False
+    layer.weight[index_to_nullify] = 0
+    layer.weight.requires_grad = _original_requires_grad
+    if hasattr(layer, "bias") and layer.bias is not None:
+        layer.bias.requires_grad = False
+        layer.bias[index_to_nullify] = 0
+        layer.weight.requires_grad = _original_requires_grad
+
+
+def _nullify_linear_layer(layer: nn.Linear, index_to_nullify: torch.LongTensor, input_dim: bool = False) -> None:
+    """
+    Nullify the specified neurons in the linear layer.
+    @see prune_linear_layer of transformers
+
+    :param layer: nn.Linear layer to nullify inplace
+    :param index_to_nullify: indices of neurons to nullify
+    :param input_dim: if True, nullify input neurons, otherwise nullify output neurons
+        Note: for linear layer, dim=0 in the matrix is the output neurons, dim=1 is the input neurons
+    :return: None
+    """
+    _original_requires_grad = layer.weight.requires_grad
+    index_to_nullify = index_to_nullify.to(layer.weight.device)
+    if input_dim:
+        layer.weight.requires_grad = False
+        layer.weight[:, index_to_nullify] = 0
+        layer.weight.requires_grad = _original_requires_grad
+    else:
+        layer.weight.requires_grad = False
+        layer.weight[index_to_nullify, :] = 0
+        layer.weight.requires_grad = _original_requires_grad
+        if layer.bias is not None:
+            layer.bias.requires_grad = False
+            layer.bias[index_to_nullify] = 0
+            layer.bias.requires_grad = _original_requires_grad
 
 
 def nullify_hidden_state(model: PreTrainedModel, neurons_to_nullify: list[int]) -> None:
@@ -153,28 +215,77 @@ def nullify_hidden_state(model: PreTrainedModel, neurons_to_nullify: list[int]) 
     :param model: The transformers pytorch model to nullify
     :param neurons_to_nullify: List of neurons in dimensions to nullify from the add hidden states along the model
     """
-    neurons_indexes_to_nullify = torch.LongTensor(list(set(neurons_to_nullify)))
+    print(model)
 
-    # for name in ["word_embeddings", "position_embeddings", "token_type_embeddings"]:
-    #     module = getattr(model.embeddings, name, None)
-    #     if module is not None:
-    #         module.weight = nn.Parameter(module.weight[neurons_indexes_to_keep])
-    _nullify_embedding_layer(
-        model.embeddings.word_embeddings,
-        neurons_indexes_to_nullify,
-    )
-    _nullify_embedding_layer(
-        model.embeddings.position_embeddings,
-        neurons_indexes_to_nullify,
-    )
-    _nullify_embedding_layer(
-        model.embeddings.token_type_embeddings,
-        neurons_indexes_to_nullify,
-    )
-    _nullify_layer_norm(
-        model.embeddings.LayerNorm,
-        neurons_indexes_to_nullify,
-    )
+    base_model, architecture = model.base_model, model.config.model_type
+    hidden_states_to_nullify = torch.LongTensor(list(set(neurons_to_nullify)))
 
-    for layer in model.encoder.layer:
-        raise NotImplementedError()
+    if architecture == "bert":
+        raise NotImplementedError("Not implemented for BERT")
+    elif architecture == "llama":
+        if hasattr(model, "lm_head"):
+            _nullify_linear_layer(
+                model.lm_head,
+                hidden_states_to_nullify,
+                input_dim=True,
+            )
+        _nullify_embedding_layer_hidden_states(
+            base_model.embed_tokens,
+            hidden_states_to_nullify,
+        )
+        _nullify_layer_norm(
+            base_model.norm,
+            hidden_states_to_nullify,
+        )
+
+        for layer in base_model.layers:
+            # layer norms
+            _nullify_layer_norm(
+                layer.input_layernorm,
+                hidden_states_to_nullify,
+            )
+            _nullify_layer_norm(
+                layer.post_attention_layernorm,
+                hidden_states_to_nullify,
+            )
+
+            # nullify attention layers hidden state
+            _nullify_linear_layer(
+                layer.self_attn.q_proj,
+                hidden_states_to_nullify,
+                input_dim=True,
+            )
+            _nullify_linear_layer(
+                layer.self_attn.k_proj,
+                hidden_states_to_nullify,
+                input_dim=True,
+            )
+            _nullify_linear_layer(
+                layer.self_attn.v_proj,
+                hidden_states_to_nullify,
+                input_dim=True,
+            )
+            _nullify_linear_layer(
+                layer.self_attn.o_proj,
+                hidden_states_to_nullify,
+                input_dim=False,
+            )
+
+            # nullify ffn layers hidden state
+            _nullify_linear_layer(
+                layer.mlp.gate_proj,
+                hidden_states_to_nullify,
+                input_dim=True,
+            )
+            _nullify_linear_layer(
+                layer.mlp.up_proj,
+                hidden_states_to_nullify,
+                input_dim=True,
+            )
+            _nullify_linear_layer(
+                layer.mlp.down_proj,
+                hidden_states_to_nullify,
+                input_dim=False,
+            )
+    else:
+        raise ValueError(f"Unsupported architecture: {architecture}")
