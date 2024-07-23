@@ -1,10 +1,13 @@
 import warnings
 
+import peft.tuners.lora
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 from transformers.models.bert.modeling_bert import BertOnlyMLMHead
-from transformers.pytorch_utils import prune_linear_layer
+from transformers.pytorch_utils import prune_linear_layer as transformers_prune_linear_layer
+
+from adaptive_pruning.utils import get_base_model
 
 
 def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list[int]]) -> None:
@@ -15,7 +18,7 @@ def prune_attention_heads(model: PreTrainedModel, heads_to_prune: dict[int, list
     :param model: The transformers pytorch model to prune
     :param heads_to_prune: A dictionary with the layer indices as keys and a list of head indices to prune as values
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # ignore "no-op" warning when pruning all heads in a layer
@@ -75,7 +78,7 @@ def prune_attention_layers(model: PreTrainedModel, layers_to_prune: list[int]) -
     :param model: The transformers pytorch model to prune
     :param layers_to_prune: A list of layer indices to prune
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
 
     heads_to_prune = {layer_index: list(range(model.config.num_attention_heads)) for layer_index in layers_to_prune}
     prune_attention_heads(model, heads_to_prune)
@@ -102,7 +105,7 @@ def prune_ffn_neurons(model: PreTrainedModel, neurons_to_prune: dict[int, list[i
     :param model: The transformers pytorch model to prune
     :param neurons_to_prune: A dictionary with the layer indices as keys and a list of neuron indices to prune as values
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
 
     for layer_index, neurons in neurons_to_prune.items():
         neurons_indexes_to_prune = torch.LongTensor(neurons)
@@ -151,7 +154,7 @@ def prune_ffn_layers(model: PreTrainedModel, layers_to_prune: list[int]) -> None
     :param model: The transformers pytorch model to prune
     :param layers_to_prune: A list of layer indices to prune
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # ignore "no-op" warning when pruning all neurons in a layer
@@ -202,7 +205,19 @@ def _prune_linear_layer(layer: nn.Linear, index_to_prune: torch.LongTensor, inpu
     """Just run the prune_linear_layer function from transformers.pytorch_utils"""
     dim = 1 if input_dim else 0
     index_to_keep = torch.LongTensor(list(set(range(layer.weight.size(dim))) - {int(i) for i in index_to_prune}))
-    return prune_linear_layer(layer, index_to_keep, dim=dim)
+    if isinstance(layer, nn.Linear):
+        return transformers_prune_linear_layer(layer, index_to_keep, dim=dim)
+    elif isinstance(layer, peft.tuners.lora.Linear):
+        raise NotImplementedError("Pruning LORA layers is not supported yet")
+        # TODO: prune with LORA weights, for now only after merging
+        # https://huggingface.co/docs/peft/main/en/developer_guides/lora#merge-lora-weights-into-the-base-model
+        layer: peft.tuners.lora.Linear
+        layer.base_layer = transformers_prune_linear_layer(layer.base_layer, index_to_keep, dim=dim)
+        # if input_dim:
+        # layer.lora_A
+        return layer
+    else:
+        raise ValueError(f"Unsupported layer type: {type(layer)}")
 
 
 def _prune_embedding_layer_hidden_states(layer: nn.Embedding, index_to_prune: torch.LongTensor) -> nn.Embedding:
@@ -254,7 +269,7 @@ def prune_hidden_states(model: PreTrainedModel, hidden_states_to_prune: list[int
     :param hidden_states_to_prune: List of neurons in dimensions to prune from the add hidden states along the model
     """
     print(model)
-    base_model, architecture = model.base_model, model.config.model_type
+    base_model, architecture = get_base_model(model), model.config.model_type
     hidden_states_to_prune = torch.LongTensor(hidden_states_to_prune)
 
     if architecture == "bert":

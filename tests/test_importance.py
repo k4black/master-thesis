@@ -16,7 +16,7 @@ from adaptive_pruning.importance import (
     info_to_fisher,
     info_to_max,
     info_to_mean,
-    select_attention_heads,
+    select_to_prune_attention_heads,
     select_to_prune_attention_layers,
     select_to_prune_ffn_layers,
     select_to_prune_ffn_neurons,
@@ -93,7 +93,7 @@ class TestSelectAttentionHeads:
         percent_heads_to_prune: float,
         expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
-        selected_heads = select_attention_heads(importance_scores, percent_heads_to_prune)
+        selected_heads = select_to_prune_attention_heads(importance_scores, percent_heads_to_prune)
         assert selected_heads == expected_heads_to_prune
 
     @pytest.mark.parametrize(
@@ -111,7 +111,7 @@ class TestSelectAttentionHeads:
         percent_heads_to_prune: float,
         expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
-        selected_heads = select_attention_heads(importance_scores, percent_heads_to_prune)
+        selected_heads = select_to_prune_attention_heads(importance_scores, percent_heads_to_prune)
         assert selected_heads == expected_heads_to_prune
 
     @pytest.mark.parametrize(
@@ -133,8 +133,23 @@ class TestSelectAttentionHeads:
         percent_heads_to_prune: float,
         expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
-        selected_heads = select_attention_heads(importance_scores, percent_heads_to_prune, uniform_among_layers=True)
+        selected_heads = select_to_prune_attention_heads(
+            importance_scores, percent_heads_to_prune, uniform_among_layers=True
+        )
         assert selected_heads == expected_heads_to_prune
+
+    @pytest.mark.parametrize("round_to_heads", [1, 2, 3, 4, 5, 6, 7, 16])
+    @pytest.mark.parametrize("is_uniform", [False, True])
+    def test_rounding(self, round_to_heads: int, is_uniform: bool) -> None:
+        torch.manual_seed(42)
+        importance_scores = torch.rand(10, 100)  # 10 layers, 100 heads
+        percent_heads_to_prune = 0.231
+        selected_heads = select_to_prune_attention_heads(
+            importance_scores, percent_heads_to_prune, round_to_heads=round_to_heads, uniform_among_layers=is_uniform
+        )
+
+        for layer, heads in selected_heads.items():
+            assert len(heads) % round_to_heads == 0, f"Layer {layer} has {len(heads)} heads, expected x{round_to_heads}"
 
 
 class TestSelectAttentionLayers:
@@ -160,7 +175,7 @@ class TestSelectAttentionLayers:
         assert selected_layers == expected_layers_to_prune
 
 
-class TestSelectFnnNeurons:
+class TestSelectFfnNeurons:
     @pytest.mark.parametrize(
         "importance_scores, percent_neurons_to_prune, expected_neurons_to_prune",
         [
@@ -202,6 +217,25 @@ class TestSelectFnnNeurons:
             importance_scores, percent_neurons_to_prune, uniform_among_layers=True
         )
         assert selected_neurons == expected_neurons_to_prune
+
+    @pytest.mark.parametrize("round_to_neurons", [1, 2, 3, 4, 5, 6, 7, 16, 32, 64, 128])
+    @pytest.mark.parametrize("is_uniform", [False, True])
+    def test_rounding(self, round_to_neurons: int, is_uniform: bool) -> None:
+        torch.manual_seed(42)
+        importance_scores = torch.rand(10, 1000)
+
+        percent_neurons_to_prune = 0.231
+        selected_neurons = select_to_prune_ffn_neurons(
+            importance_scores,
+            percent_neurons_to_prune,
+            round_to=round_to_neurons,
+            uniform_among_layers=is_uniform,
+        )
+
+        for layer, neurons in selected_neurons.items():
+            assert (
+                len(neurons) % round_to_neurons == 0
+            ), f"Layer {layer} has {len(neurons)} neurons, expected x{round_to_neurons}"
 
 
 class TestSelectFnnLayers:

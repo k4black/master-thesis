@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 
+from adaptive_pruning.utils import get_base_model
+
 
 def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, list[int]]) -> None:
     """
@@ -12,7 +14,7 @@ def nullify_attention_heads(model: PreTrainedModel, heads_to_nullify: dict[int, 
     :param model: The transformers pytorch model to nullify
     :param heads_to_nullify: A dictionary with the layer indices as keys and a list of head indices to nullify as values
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     head_size = model.config.hidden_size // model.config.num_attention_heads
 
     if architecture == "bert":
@@ -67,7 +69,7 @@ def nullify_attention_layers(model: PreTrainedModel, layers_to_nullify: list[int
     :param model: The transformers pytorch model to nullify
     :param layers_to_nullify: A list of layer indices to nullify
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     heads_to_nullify = {layer_index: list(range(model.config.num_attention_heads)) for layer_index in layers_to_nullify}
 
     nullify_attention_heads(model, heads_to_nullify)
@@ -95,7 +97,7 @@ def nullify_ffn_neurons(model: PreTrainedModel, neurons_to_nullify: dict[int, li
     :param model: The transformers pytorch model to nullify
     :param neurons_to_nullify: A dictionary with the layer indices as keys and a list of neuron indices to nullify as values
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
 
     if architecture == "bert":
         for layer_index, neurons in neurons_to_nullify.items():
@@ -137,7 +139,7 @@ def nullify_ffn_layers(model: PreTrainedModel, layers_to_nullify: list[int]) -> 
     :param model: The transformers pytorch model to nullify
     :param layers_to_nullify: A list of layer indices to nullify
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     neurons_to_nullify = {layer_index: list(range(model.config.intermediate_size)) for layer_index in layers_to_nullify}
 
     nullify_ffn_neurons(model, neurons_to_nullify)
@@ -215,7 +217,7 @@ def nullify_hidden_states(model: PreTrainedModel, neurons_to_nullify: list[int])
     :param model: The transformers pytorch model to nullify
     :param neurons_to_nullify: List of neurons in dimensions to nullify from the add hidden states along the model
     """
-    base_model, architecture = model.base_model, model.config.model_type
+    base_model, architecture = get_base_model(model), model.config.model_type
     hidden_states_to_nullify = torch.LongTensor(list(set(neurons_to_nullify)))
 
     if architecture == "bert":

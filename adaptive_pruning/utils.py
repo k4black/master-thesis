@@ -7,11 +7,22 @@ from typing import TYPE_CHECKING, Any
 import tabulate
 import torch
 from calflops import calculate_flops
-from transformers import PreTrainedModel, PreTrainedTokenizer
+from peft import LoraModel, PeftModelForCausalLM
+from transformers import LlamaForCausalLM, PreTrainedModel, PreTrainedTokenizer
 
 
 if TYPE_CHECKING:
     from .importance import ComponentsImportance, ComponentsInfo
+
+
+def get_base_model(model: PreTrainedModel) -> PreTrainedModel:
+    if isinstance(model, PeftModelForCausalLM):
+        return get_base_model(model.base_model)
+    if isinstance(model, LoraModel):
+        return get_base_model(model.model)
+    if isinstance(model, LlamaForCausalLM):
+        return model.base_model
+    return model.base_model if hasattr(model, "base_model") else model
 
 
 def count_flops_macs_params(
@@ -102,7 +113,7 @@ def measure_model_stats(
         if original_model_stats are provided, the dict will also contain the 'X_pruned_percentage' keys
         and second dict with total - flops, macs, params, zero_params
     """
-    base_model = model.base_model if hasattr(model, "base_model") else model
+    base_model = get_base_model(model)
     assert (
         "llama" in base_model.config.model_type.lower()
     ), f"Only llama models are supported, got {base_model.config.model_type}"

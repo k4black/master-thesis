@@ -11,7 +11,7 @@ base_model_name='meta-llama/Llama-2-7b-hf'
 #base_model_name='meta-llama/Meta-Llama-3-8B'
 #save_as='llm-pruner-llama-7b-pruned'
 
-pruning_ratios="0.05 0.1 0.2 0.3 0.4 0.5 0.6"
+pruning_ratios="0.1 0.2 0.3 0.4 0.5 0.6"
 
 
 for pruning_ratio in $pruning_ratios; do

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.hooks import RemovableHandle
 from tqdm import tqdm
-from transformers import PreTrainedModel
+from transformers import PretrainedConfig, PreTrainedModel
 
 from adaptive_pruning.injections import (
     inject_attention_head_mask,
@@ -34,66 +35,156 @@ class ComponentsImportance(NamedTuple):
     hidden_states_importance: torch.Tensor  # [hidden_state]
     meta_importance: torch.Tensor  # [5] - attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state
 
+    @classmethod
+    def from_info(cls, components_info: ComponentsInfo, how_to_average: str) -> ComponentsImportance:
+        if how_to_average == "fisher_info":
+            components_importance = info_to_fisher(components_info)
+        elif how_to_average == "mean":
+            components_importance = info_to_mean(components_info)
+        elif how_to_average == "max":
+            components_importance = info_to_max(components_info)
+        elif how_to_average == "entropy":
+            components_importance = info_to_entropy(components_info)
+        elif how_to_average == "minus_entropy":
+            components_importance = info_to_minus_entropy(components_info)
+        else:
+            assert False, f"Unknown how_to_average: {how_to_average}"
+        return components_importance
+
+
+class ComponentsToPrune(NamedTuple):
+    attention_heads_to_prune: dict[int, list[int]]  # {layer: [heads]}
+    attention_layers_to_prune: list[int]  # [layers]
+    ffn_neurons_to_prune: dict[int, list[int]]  # {layer: [neurons]}
+    ffn_layers_to_prune: list[int]  # [layers]
+    hidden_states_to_prune: list[int]  # [hidden_states]
+
+    @classmethod
+    def from_importance(
+        cls,
+        components_importance: ComponentsImportance,
+        pruning_ratio: float,
+        pruning_components: list[str],  # ["attn_heads", "attn_layers", "ffn_layers", "ffn_neurons", "hidden_states"]
+        round_to: int,
+        is_uniform: bool,
+        how_to_overlap: str,  # ["fixed", "relative", "meta"]
+        config: PretrainedConfig,
+        skip_pruned_components: ComponentsToPrune | None = None,
+    ) -> ComponentsToPrune:
+        # get ratios to prune
+        attn_heads_ratio, attn_layers_ratio, ffn_neurons_ratio, ffn_layers_ratio, hidden_states_ratio = (
+            get_components_ratios(pruning_ratio, pruning_components, how_to_overlap, components_importance)
+        )
+
+        # Select components to prune
+        attention_layers_to_prune = select_to_prune_attention_layers(
+            components_importance.attention_layers_importance,
+            attn_layers_ratio,
+        )
+        head_size = config.hidden_size // config.num_attention_heads
+        attention_heads_to_prune = select_to_prune_attention_heads(
+            components_importance.attention_heads_importance,
+            attn_heads_ratio,
+            uniform_among_layers=is_uniform,
+            key_value_group_size=config.num_attention_heads // config.num_key_value_heads,
+            round_to_heads=(round_to // head_size) or 1,
+        )
+        attention_heads_to_prune = {
+            layer: heads for layer, heads in attention_heads_to_prune.items() if layer not in attention_layers_to_prune
+        }
+
+        ffn_layers_to_prune = select_to_prune_ffn_layers(
+            components_importance.ffn_layers_importance,
+            ffn_layers_ratio,
+        )
+        neurons_to_prune = select_to_prune_ffn_neurons(
+            components_importance.ffn_neurons_importance,
+            ffn_neurons_ratio,
+            uniform_among_layers=is_uniform,
+            round_to=round_to,
+        )
+        neurons_to_prune = {
+            layer: neurons for layer, neurons in neurons_to_prune.items() if layer not in attention_layers_to_prune
+        }
+        hidden_states_to_prune = select_to_prune_hidden_states(
+            components_importance.hidden_states_importance,
+            hidden_states_ratio,
+            round_to=round_to,
+        )
+
+        return ComponentsToPrune(
+            attention_heads_to_prune,
+            attention_layers_to_prune,
+            neurons_to_prune,
+            ffn_layers_to_prune,
+            hidden_states_to_prune,
+        )
+
+
+def get_insert_pruning_masks(
+    model: PreTrainedModel,
+    require_grads: bool = True,
+    dtype: torch.dtype | None = None,
+) -> tuple[dict[str, torch.Tensor], list[RemovableHandle]]:
+    dtype = dtype or model.dtype
+
+    # create masks for the model
+    pruning_masks = {
+        "attn_heads": torch.ones(
+            model.config.num_hidden_layers, model.config.num_attention_heads, device=model.device, dtype=dtype
+        ),
+        "ffn_neurons": torch.ones(
+            model.config.num_hidden_layers, model.config.intermediate_size, device=model.device, dtype=dtype
+        ),
+        "ffn_layers": torch.ones(model.config.num_hidden_layers, device=model.device, dtype=dtype),
+        "attn_layers": torch.ones(model.config.num_hidden_layers, device=model.device, dtype=dtype),
+        "hidden_states": torch.ones(model.config.hidden_size, device=model.device, dtype=dtype),
+        "meta": torch.ones(5, device=model.device, dtype=dtype),
+    }
+
+    for name, mask in pruning_masks.items():
+        mask.requires_grad_(require_grads)
+
+    # insert the hooks
+    pruning_masks_hooks = [
+        *inject_attention_head_mask(model, pruning_masks["attn_heads"], pruning_masks["meta"][0]),
+        *inject_attention_layer_mask(model, pruning_masks["attn_layers"], pruning_masks["meta"][1]),
+        *inject_ffn_neuron_mask(model, pruning_masks["ffn_neurons"], pruning_masks["meta"][2]),
+        *inject_ffn_layer_mask(model, pruning_masks["ffn_layers"], pruning_masks["meta"][3]),
+        *inject_hidden_state_mask(model, pruning_masks["hidden_states"], pruning_masks["meta"][4]),
+    ]
+
+    return pruning_masks, pruning_masks_hooks
+
 
 def collect_mask_gradients(
     model: PreTrainedModel,
     dataloader: DataLoader,
+    pruning_masks_hooks: tuple[dict[str, torch.Tensor], list[RemovableHandle]] | None = None,
     *,
+    remove_hooks: bool = True,
     verbose: bool = True,
 ) -> ComponentsInfo:
     batch_iterator = tqdm(dataloader, total=len(dataloader), desc="Collecting grads") if verbose else dataloader
     config = model.config
 
+    # Insert masks if not provided
+    if pruning_masks_hooks is None:
+        pruning_masks, pruning_masks_hooks = get_insert_pruning_masks(model)
+    else:
+        pruning_masks, pruning_masks_hooks = pruning_masks_hooks
+
+    # Create tensors to store the gradients
+    gradient_collectors = {
+        name: torch.empty((0, *mask.shape), device=model.device, dtype=model.dtype, requires_grad=False)
+        for name, mask in pruning_masks.items()
+    }
+
     # Disable grads for other model
-    for param in model.parameters():
-        param.requires_grad_(False)
     model.eval()
-
-    # create masks
-    attention_head_mask = torch.ones(config.num_hidden_layers, config.num_attention_heads).to(
-        device=model.device, dtype=model.dtype, non_blocking=True
-    )
-    ffn_neuron_mask = torch.ones(config.num_hidden_layers, config.intermediate_size).to(
-        device=model.device, dtype=model.dtype, non_blocking=True
-    )
-    ffn_layer_mask = torch.ones(config.num_hidden_layers).to(device=model.device, dtype=model.dtype, non_blocking=True)
-    attention_layer_mask = torch.ones(config.num_hidden_layers).to(
-        device=model.device, dtype=model.dtype, non_blocking=True
-    )
-    hidden_state_mask = torch.ones(config.hidden_size).to(device=model.device, dtype=model.dtype, non_blocking=True)
-
-    # Requires grad to save it
-    attention_head_mask.requires_grad_(True)
-    ffn_neuron_mask.requires_grad_(True)
-    ffn_layer_mask.requires_grad_(True)
-    attention_layer_mask.requires_grad_(True)
-    hidden_state_mask.requires_grad_(True)
-
-    # Make meta-mask over all masks - 1 for each other mask
-    meta_mask = torch.ones(5).to(model.device, dtype=model.dtype, non_blocking=True)
-    meta_mask.requires_grad_(True)
-
-    # apply masks to model
-    handles: list[RemovableHandle] = [
-        *inject_attention_head_mask(model, attention_head_mask, meta_mask[0]),
-        *inject_attention_layer_mask(model, attention_layer_mask, meta_mask[1]),
-        *inject_ffn_neuron_mask(model, ffn_neuron_mask, meta_mask[2]),
-        *inject_ffn_layer_mask(model, ffn_layer_mask, meta_mask[3]),
-        *inject_hidden_state_mask(model, hidden_state_mask, meta_mask[4]),
-    ]
-
-    attention_head_grads = torch.empty((0, config.num_hidden_layers, config.num_attention_heads)).to(
-        model.device, dtype=model.dtype, non_blocking=True
-    )
-    attention_layer_grads = torch.empty((0, config.num_hidden_layers)).to(
-        model.device, dtype=model.dtype, non_blocking=True
-    )
-    ffn_neuron_grads = torch.empty((0, config.num_hidden_layers, config.intermediate_size)).to(
-        model.device, dtype=model.dtype, non_blocking=True
-    )
-    ffn_layer_grads = torch.empty((0, config.num_hidden_layers)).to(model.device, dtype=model.dtype, non_blocking=True)
-    hidden_state_grads = torch.empty((0, config.hidden_size)).to(model.device, dtype=model.dtype, non_blocking=True)
-    meta_grads = torch.empty((0, 5)).to(model.device, dtype=model.dtype, non_blocking=True)
+    # enable grad for masks
+    for name in pruning_masks.keys():
+        pruning_masks[name].requires_grad_(True)
 
     for batch in batch_iterator:
         for k, v in batch.items():
@@ -103,44 +194,35 @@ def collect_mask_gradients(
         loss = outputs.loss
         loss.backward(retain_graph=True)  # TODO: fix error in inject_attention_head_mask
 
-        attention_head_grads = torch.cat([attention_head_grads, attention_head_mask.grad.detach().unsqueeze(0)], dim=0)
-        attention_head_mask.grad = None
+        for name in gradient_collectors:
+            gradient_collectors[name] = torch.cat(
+                [gradient_collectors[name], pruning_masks[name].grad.detach().unsqueeze(0)], dim=0
+            )
+            pruning_masks[name].grad = None
 
-        attention_layer_grads = torch.cat(
-            [attention_layer_grads, attention_layer_mask.grad.detach().unsqueeze(0)], dim=0
-        )
-        attention_layer_mask.grad = None
-
-        ffn_neuron_grads = torch.cat([ffn_neuron_grads, ffn_neuron_mask.grad.detach().unsqueeze(0)], dim=0)
-        ffn_neuron_mask.grad = None
-
-        ffn_layer_grads = torch.cat([ffn_layer_grads, ffn_layer_mask.grad.detach().unsqueeze(0)], dim=0)
-        ffn_layer_mask.grad = None
-
-        hidden_state_grads = torch.cat([hidden_state_grads, hidden_state_mask.grad.detach().unsqueeze(0)], dim=0)
-        hidden_state_mask.grad = None
-
-        meta_grads = torch.cat([meta_grads, meta_mask.grad.detach().unsqueeze(0)], dim=0)
-        meta_mask.grad = None
+    # clear graph, clear grads
+    for param in model.parameters():
+        param.grad = None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # remove masks from the model
-    for handle in handles:
-        handle.remove()
+    if remove_hooks:
+        for handle in pruning_masks_hooks:
+            handle.remove()
 
     # disable grad
-    attention_head_mask.requires_grad_(False)
-    ffn_neuron_mask.requires_grad_(False)
-    ffn_layer_mask.requires_grad_(False)
-    attention_layer_mask.requires_grad_(False)
-    hidden_state_mask.requires_grad_(False)
+    for name in pruning_masks.keys():
+        pruning_masks[name].requires_grad_(False)
+    model.train()
 
     return ComponentsInfo(
-        attention_head_grads,
-        attention_layer_grads,
-        ffn_neuron_grads,
-        ffn_layer_grads,
-        hidden_state_grads,
-        meta_grads,
+        gradient_collectors["attn_heads"].detach(),
+        gradient_collectors["attn_layers"].detach(),
+        gradient_collectors["ffn_neurons"].detach(),
+        gradient_collectors["ffn_layers"].detach(),
+        gradient_collectors["hidden_states"].detach(),
+        gradient_collectors["meta"].detach(),
     )
 
 
@@ -438,7 +520,7 @@ def info_to_minus_entropy(
     return ComponentsImportance(*[(i * torch.log(i)).sum(dim=0) for i in components_info])
 
 
-def select_attention_heads(
+def select_to_prune_attention_heads(
     importance_scores: torch.Tensor,
     percent_heads_to_prune: float,
     uniform_among_layers: bool = False,
@@ -479,6 +561,7 @@ def select_attention_heads(
     if uniform_among_layers:
         num_heads_to_prune = int(num_heads * percent_heads_to_prune)
         num_heads_to_prune = round(num_heads_to_prune / round_to_heads) * round_to_heads
+        num_heads_to_prune = min(num_heads_to_prune, num_heads)
 
         for layer_index in range(num_layers):
             # sort heads by importance
@@ -505,7 +588,7 @@ def select_attention_heads(
         # round to the nearest round_to_heads for each layer (drop excess heads)
         for layer, heads in heads_to_prune.items():
             num_heads_to_prune_layer = len(heads)
-            num_heads_to_prune_layer = round(num_heads_to_prune_layer / round_to_heads) * round_to_heads
+            num_heads_to_prune_layer = math.floor(num_heads_to_prune_layer / round_to_heads) * round_to_heads
             heads_to_prune[layer] = heads[:num_heads_to_prune_layer]
 
     # keep at least 1 head per layer (or round_to_heads), remove unused heads_to_prune lists
@@ -530,6 +613,7 @@ def select_attention_heads(
 def select_to_prune_attention_layers(
     importance_scores: torch.Tensor,
     percent_layers_to_prune: float,
+    # skip_layers: list[int] | None = None,
 ) -> list[int]:
     """
     Select least-k attention layers based on the importance scores.
@@ -544,6 +628,8 @@ def select_to_prune_attention_layers(
     num_layers_to_prune = int(num_layers * percent_layers_to_prune)
 
     _, sorted_indices = importance_scores.sort()
+    # if skip_layers:
+    #     sorted_indices = torch.tensor([i for i in sorted_indices if i not in skip_layers])
     layers_to_prune = sorted_indices[:num_layers_to_prune].tolist()
 
     return layers_to_prune
@@ -572,6 +658,7 @@ def select_to_prune_ffn_neurons(
     if uniform_among_layers:
         num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
         num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
+        num_neurons_to_prune = min(num_neurons_to_prune, num_neurons)
 
         for layer_index in range(num_layers):
             # sort neurons by importance
@@ -598,7 +685,7 @@ def select_to_prune_ffn_neurons(
         # round to the nearest round_to for each layer (drop excess neurons)
         for layer, neurons in neurons_to_prune.items():
             num_neurons_to_prune_layer = len(neurons)
-            num_neurons_to_prune_layer = round(num_neurons_to_prune_layer / round_to) * round_to
+            num_neurons_to_prune_layer = math.floor(num_neurons_to_prune_layer / round_to) * round_to
             neurons_to_prune[layer] = neurons[:num_neurons_to_prune_layer]
 
     return neurons_to_prune
@@ -643,8 +730,149 @@ def select_to_prune_hidden_states(
     num_neurons = importance_scores.size(0)
     num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
     num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
+    num_neurons_to_prune = min(num_neurons_to_prune, num_neurons)
 
     _, sorted_indices = importance_scores.sort()
     neurons_to_prune = sorted_indices[:num_neurons_to_prune].tolist()
 
     return neurons_to_prune
+
+
+def get_components_ratios(
+    pruning_ratio: float,
+    pruning_components: list[str],  # ["attn_heads", "attn_layers", "ffn_layers", "ffn_neurons", "hidden_states"]
+    how_to_overlap: str,  # ["fixed", "relative", "meta"]
+    components_importance: ComponentsImportance | None = None,
+) -> tuple[float, float, float, float, float]:
+    """
+    Calculate the ratios of pruning for each component based on the pruning ratio and components to prune.
+
+    :param pruning_ratio: The overall pruning ratio
+    :param pruning_components: The components to prune
+    :param how_to_overlap: The strategy to overlap the pruning ratios
+    :return: The ratios of pruning for each component
+    """
+
+    attention_heads_ratio = pruning_ratio if "attn_heads" in pruning_components else 0.0
+    attention_layers_ratio = pruning_ratio if "attn_layers" in pruning_components else 0.0
+    ffn_neurons_ratio = pruning_ratio if "ffn_neurons" in pruning_components else 0.0
+    ffn_layers_ratio = pruning_ratio if "ffn_layers" in pruning_components else 0.0
+    hidden_states_ratio = pruning_ratio if "hidden_states" in pruning_components else 0.0
+
+    if how_to_overlap == "fixed":
+        return (attention_heads_ratio, attention_layers_ratio, ffn_neurons_ratio, ffn_layers_ratio, hidden_states_ratio)
+
+    elif how_to_overlap == "fixed_x1_x15_x05":
+        # x1 attn heads, x1.5 neurons, x0.5 hidden states
+        return attention_heads_ratio * 1, 0, ffn_neurons_ratio * 1.5, 0, hidden_states_ratio * 0.5
+
+    elif how_to_overlap == "fixed_x1_x15_x01":
+        return attention_heads_ratio * 1, 0, ffn_neurons_ratio * 1.5, 0, hidden_states_ratio * 0.1
+
+    elif how_to_overlap == "relative":
+        assert components_importance is not None, "components_importance should be provided for relative importance"
+        relative_importance = torch.tensor(
+            [
+                components_importance.attention_heads_importance.cpu().mean().item(),
+                # components_importance.attention_layers_importance.cpu().mean().item(),
+                components_importance.ffn_neurons_importance.cpu().mean().item(),
+                # components_importance.ffn_layers_importance.cpu().mean().item(),
+                components_importance.hidden_states_importance.cpu().mean().item(),
+            ]
+        )
+        relative_importance = 1 / relative_importance
+        relative_importance /= relative_importance.sum()
+
+        # normalize the ratio to have mean ratio as pruning_ratio
+        pruning_ratios = relative_importance * pruning_ratio * 3
+        pruning_ratios = torch.clip(pruning_ratios, 0, 1)
+
+        print(f"relative_importance: {relative_importance}")
+        print(f"pruning_ratio: {pruning_ratio}")
+        print(f"pruning_ratios: {pruning_ratios}")
+        return pruning_ratios[0].item(), 0.0, pruning_ratios[1].item(), 0.0, pruning_ratios[2].item()
+
+    elif how_to_overlap == "relative_per_param":
+        # TODO: Fix
+        # Use actual relative importance to calculate pruning ratio
+        # Use number of possible pruning parameters to calculate pruning ratio
+        # adjust for number of params in the component
+        _num_q_per_kv = config.num_attention_heads // config.num_key_value_heads
+        _single_head_size = config.hidden_size // config.num_attention_heads
+        # k + v of the same size and q and output of the same size
+        num_parameters_attention_head_group = (
+            2 * _single_head_size * config.hidden_size + 2 * _single_head_size * _num_q_per_kv * config.hidden_size
+        )
+        num_parameters_attention_layer = num_parameters_attention_head_group * config.num_key_value_heads  # + bias
+        # gate, input, output
+        num_parameters_ffn_neuron = 3 * config.hidden_size
+        num_parameters_ffn_layer = num_parameters_ffn_neuron * config.intermediate_size  # + bias
+        # hidden state = emb + 2 norms, attention, ffn
+        num_parameters_hidden_state = config.vocab_size + config.num_hidden_layers * (
+            2
+            + 2 * _single_head_size * config.num_key_value_heads
+            + 2 * _single_head_size * config.num_attention_heads
+            + 3 * config.intermediate_size
+        )
+        total_parameters = num_parameters_hidden_state * config.hidden_size + config.num_hidden_layers * (  # noqa: F841
+            num_parameters_attention_layer + num_parameters_ffn_layer
+        )
+
+        relative_importance = torch.tensor(
+            [
+                components_importance.attention_heads_importance.cpu().mean().item()
+                / num_parameters_attention_head_group,
+                components_importance.attention_layers_importance.cpu().mean().item() / num_parameters_attention_layer,
+                components_importance.ffn_neurons_importance.cpu().mean().item() / num_parameters_ffn_neuron,
+                components_importance.ffn_layers_importance.cpu().mean().item() / num_parameters_ffn_layer,
+                components_importance.hidden_states_importance.cpu().mean().item() / num_parameters_hidden_state,
+            ]
+        )
+        relative_pruning_coefficient = torch.softmax(-1 * relative_importance, dim=0) * relative_importance.shape[0]
+        print("Relative importance", relative_importance)
+        print("Relative pruning coefficient", relative_pruning_coefficient)
+
+        attention_heads_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[0].item()
+            if do_prune_attention_heads or do_prune_attention_heads_uniform
+            else 0
+        )
+        attention_layers_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[1].item() if do_prune_attention_layers else 0
+        )
+        ffn_neurons_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[2].item()
+            if do_prune_ffn_neurons or do_prune_ffn_neurons_uniform
+            else 0
+        )
+        ffn_layers_pruning_ratio = pruning_ratio * relative_pruning_coefficient[3].item() if do_prune_ffn_layers else 0
+        hidden_states_pruning_ratio = (
+            pruning_ratio * relative_pruning_coefficient[4].item() if do_prune_hidden_states else 0
+        )
+
+    elif how_to_overlap == "meta":
+        assert components_importance is not None, "components_importance should be provided for meta importance"
+        meta_importance = components_importance.meta_importance.cpu()
+        meta_importance = torch.tensor(
+            [
+                meta_importance[0].mean().item(),
+                # meta_importance[1].mean().item(),
+                meta_importance[2].mean().item(),
+                # meta_importance[3].mean().item(),
+                meta_importance[4].mean().item(),
+            ]
+        )
+        meta_importance = 1 / meta_importance
+        meta_importance /= meta_importance.sum()
+
+        # normalize the ratio to have mean ratio as pruning_ratio
+        pruning_ratios = meta_importance * pruning_ratio * 5
+        pruning_ratios = torch.clip(pruning_ratios, 0, 1)
+
+        print(f"meta_importance: {meta_importance}")
+        print(f"pruning_ratio: {pruning_ratio}")
+        print(f"pruning_ratios: {pruning_ratios}")
+        return pruning_ratios[0].item(), 0.0, pruning_ratios[1].item(), 0.0, pruning_ratios[2].item()
+
+    else:
+        assert False, f"Unknown how_to_overlap: {how_to_overlap}"

@@ -30,7 +30,14 @@ else:
     from LLMPruner.models.hf_llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
 from adaptive_pruning.utils import measure_model_stats
-from utils import create_neptune_run, evaluate_model, neptune_record_pruned_model, save_model_tokenizer, set_random_seed
+from utils import (
+    create_neptune_run,
+    evaluate_model,
+    load_llama_model,
+    neptune_record_pruned_model,
+    save_model_tokenizer,
+    set_random_seed,
+)
 
 
 load_dotenv()  # take environment variables
@@ -43,7 +50,8 @@ torch.backends.cudnn.benchmark = False
 
 
 def main(
-    base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    base_model: str = "huggyllama/llama-7b",
+    attention_type: Optional[str] = "sdpa",
     pruning_ratio: float = 0.5,
     pruner_type: str = "taylor",  # l1, l2, taylor
     taylor: str = "param_first",  # vectorize, param_second, param_first, param_mix
@@ -89,20 +97,20 @@ def main(
         calibration_how_to_collect=pruner_type,
         calibration_how_to_average=taylor,
         calibration_how_to_overlap="",
+        attention_type=attention_type,
         save_model_as=save_model_as,
         extra_tags=["baseline"],
     )
-
-    print(f"Loading model {base_model}...")
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
-    model = LlamaForCausalLM.from_pretrained(base_model, low_cpu_mem_usage=True)
-    if IS_CUDA_AVAILABLE:
-        model.half()
-        model.to("cuda")
-
     pruner_type = pruner_type.lower()
     assert pruner_type in ["random", "l2", "l1", "taylor"]
 
+    # Load the finetuned model and the corresponding tokenizer
+    config, model, tokenizer = load_llama_model(
+        base_model,
+        attention_type=attention_type,
+        device="cuda" if IS_CUDA_AVAILABLE else "cpu",
+        custom_model_cls=LlamaForCausalLM,
+    )
     for param in model.parameters():
         param.requires_grad_(True)
     original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)

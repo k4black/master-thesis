@@ -4,10 +4,16 @@ from typing import Optional
 
 import torch
 import typer
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
-from utils import create_neptune_run, evaluate_model, neptune_record_pruned_model, save_model_tokenizer, set_random_seed
+from adaptive_pruning.utils import measure_model_stats
+from utils import (
+    create_neptune_run,
+    evaluate_model,
+    load_llama_model,
+    neptune_record_pruned_model,
+    save_model_tokenizer,
+    set_random_seed,
+)
 
 
 IS_CUDA_AVAILABLE = torch.cuda.is_available()
@@ -19,10 +25,13 @@ torch.backends.cudnn.benchmark = False
 
 
 def main(
-    base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    base_model: str = "huggyllama/llama-7b",
+    attention_type: Optional[str] = "sdpa",
+    pytorch_compile: bool = False,
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
+    extra_tags: Optional[str] = None,
 ) -> None:
     set_random_seed(seed)
 
@@ -39,21 +48,16 @@ def main(
         calibration_how_to_collect="",
         calibration_how_to_average="",
         calibration_how_to_overlap="",
+        attention_type=attention_type,
         save_model_as=save_model_as,
-        extra_tags=["original", "baseline"],
+        extra_tags=["original", "baseline", *extra_tags.split(",")] if extra_tags else ["original", "baseline"],
     )
+    neptune_run["parameters/compile"] = pytorch_compile
 
     # Load the finetuned model and the corresponding tokenizer
-    print(f"Loading model {base_model}...")
-    config = AutoConfig.from_pretrained(base_model)
-    model = AutoModelForCausalLM.from_pretrained(base_model, config=config)
-    if IS_CUDA_AVAILABLE:
-        model = model.to(device="cuda", non_blocking=True, dtype=torch.float16)
-    model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
-    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-    print(f"Original Model: {base_model} loaded")
-    count_flops_macs_params(model, tokenizer, print_results=True)
+    config, model, tokenizer = load_llama_model(
+        base_model, attention_type=attention_type, device="cuda" if IS_CUDA_AVAILABLE else "cpu"
+    )
     original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
 
     # print model with sample input
@@ -64,6 +68,10 @@ def main(
 
     if save_model_as:
         save_model_tokenizer(model, tokenizer, "results/" + save_model_as, neptune_run=neptune_run)
+
+    if pytorch_compile:
+        print("Compiling the model...")
+        model = torch.compile(model)
 
     # Log pruned model
     if evaluate_on:

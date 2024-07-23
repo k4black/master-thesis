@@ -16,15 +16,49 @@ from lm_eval.utils import make_table
 from neptune.types import File
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import BatchEncoding, DataCollatorWithPadding, PreTrainedModel, PreTrainedTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    DataCollatorWithPadding,
+    PretrainedConfig,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
+
+from adaptive_pruning.utils import count_flops_macs_params
 
 
 LM_EVAL_NAME_TO_TASKS = {
-    "perplexity": ["wikitext"],
-    "short": ["piqa", "boolq", "arc_easy"],
-    "full": ["piqa", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"],
-    "extra": ["pile_10k", "gsm8k", "gsm8k_cot", "toxigen"],  # "gsm8k_cot" and "toxigen" to long?
+    "perplexity": [
+        "wikitext",
+    ],
+    "short": [
+        "piqa",
+        "boolq",
+        "arc_easy",
+    ],
+    "full": [
+        "piqa",
+        "boolq",
+        "hellaswag",
+        "winogrande",
+        "arc_easy",
+        "arc_challenge",
+        "openbookqa",
+    ],
+    "extra": [
+        "pile_10k",
+        "gsm8k",
+        # "gsm8k_cot",
+        "toxigen",
+    ],  # "gsm8k_cot" and "toxigen" to long?
     "bias": [
+        "truthfulqa_mc1",
+        "crows_pairs_english",
+    ],
+    "bias-full": [
         "truthfulqa_mc1",
         "crows_pairs_english",
         "crows_pairs_english_age",
@@ -63,20 +97,19 @@ def create_neptune_run(
     calibration_how_to_overlap: str,  # fixed, relative, etc.
     save_model_as: str | None = None,
     pruning_round_to: int | None = None,
+    attention_type: str | None = None,
     finetuning: bool = False,
     finetuning_dataset: str | None = None,
+    finetuning_dataset_size: int | None = None,
     finetuning_batch_size: int | None = None,
     finetuning_num_samples: int | None = None,
     finetuning_learning_rate: float | None = None,
-    finetuning_epochs: int | None = None,
+    finetuning_epochs: float | None = None,
     *,
     extra_tags: list[str] | None = None,
 ) -> neptune.Run:
     neptune_run = neptune.init_run(
-        tags=[
-            base_model,
-            *(extra_tags or []),
-        ]
+        tags=extra_tags or [],
     )
 
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
@@ -102,13 +135,15 @@ def create_neptune_run(
         "calibration_how_to_collect": calibration_how_to_collect,
         "calibration_how_to_average": calibration_how_to_average,
         "calibration_how_to_overlap": calibration_how_to_overlap,
+        "attention_type": attention_type,
         "save_model_as": save_model_as,
-        # "finetuning": finetuning,
-        # "finetuning_dataset": finetuning_dataset,
-        # "finetuning_batch_size": finetuning_batch_size,
-        # "finetuning_num_samples": finetuning_num_samples,
-        # "finetuning_learning_rate": finetuning_learning_rate,
-        # "finetuning_epochs": finetuning_epochs,
+        "finetuning": finetuning,
+        "finetuning_dataset": finetuning_dataset,
+        "finetuning_dataset_size": finetuning_dataset_size,
+        "finetuning_batch_size": finetuning_batch_size,
+        "finetuning_num_samples": finetuning_num_samples,
+        "finetuning_learning_rate": finetuning_learning_rate,
+        "finetuning_epochs": finetuning_epochs,
     }
 
     return neptune_run
@@ -132,6 +167,9 @@ def get_tokenized_dataset(
         field = "text"
     elif name == "c4":
         dataset_args = dict(path="allenai/c4", name="en")
+        field = "text"
+    elif name == "alpaca-gpt4":
+        dataset_args = dict(path="vicgalle/alpaca-gpt4")
         field = "text"
     else:
         raise NotImplementedError(f"Calibration dataset {name} is not supported.")
@@ -518,3 +556,33 @@ def neptune_record_pruned_model(
     else:
         neptune_run["pruning/percent_left"] = 100.0
         neptune_run["pruning/percent_nonzero_left"] = 100.0
+
+
+def load_llama_model(
+    model_name: str,
+    attention_type: str | None = None,
+    device: str = "cuda",
+    custom_model_cls: type[PreTrainedModel] | None = None,
+) -> tuple[PretrainedConfig, PreTrainedModel, PreTrainedTokenizer]:
+    print(f"Loading model {model_name}...")
+    config = AutoConfig.from_pretrained(model_name, attn_implementation=attention_type)
+    if custom_model_cls:
+        model = custom_model_cls.from_pretrained(model_name, config=config, low_cpu_mem_usage=True)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            config=config,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        )
+    model = model.to(device=device, non_blocking=True, dtype=torch.float16 if device == "cuda" else torch.float32)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
+    print(f"Original Model: {model_name} loaded")
+    try:
+        count_flops_macs_params(model, tokenizer, print_results=True)
+    except Exception as e:
+        print("!" * 512)
+        print(f"Error counting flops, macs, params: {e}")
+    return config, model, tokenizer

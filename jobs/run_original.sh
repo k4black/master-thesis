@@ -13,5 +13,6 @@ base_model_name='meta-llama/Llama-2-7b-hf'
 echo "[START] - Start Original Model (0)"
 python run_original.py \
     --base-model=$base_model_name \
+    --pytorch-compile \
     --evaluate-on="perplexity+full+bias"
 echo "[END] - Finish Original Model (0)"

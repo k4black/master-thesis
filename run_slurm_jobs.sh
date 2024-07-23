@@ -20,7 +20,7 @@ srun \
   --container-image=/enroot/nvcr.io_nvidia_pytorch_24.06-py3.sqsh\
   --job-name=master-thesis \
   --gpus=1 \
-  --mem=64G \
+  --mem=86G \
   --cpus-per-task=8 \
   --partition=$1 \
   --task-prolog="`pwd`/jobs/install.sh" \

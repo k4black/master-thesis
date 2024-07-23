@@ -8,10 +8,17 @@ from unittest.mock import patch
 import torch
 import typer
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from adaptive_pruning.utils import count_flops_macs_params, measure_model_stats
-from utils import create_neptune_run, evaluate_model, neptune_record_pruned_model, save_model_tokenizer, set_random_seed
+from utils import (
+    create_neptune_run,
+    evaluate_model,
+    load_llama_model,
+    neptune_record_pruned_model,
+    save_model_tokenizer,
+    set_random_seed,
+)
 
 
 if typing.TYPE_CHECKING:
@@ -63,7 +70,8 @@ class WandaLibArgs:
 
 
 def main(
-    base_model: str = "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    base_model: str = "huggyllama/llama-7b",
+    attention_type: Optional[str] = "sdpa",
     pruning_ratio: float = 0.5,
     num_samples: int = 128,
     sparsity_type: Optional[str] = "unstructured",  # ["unstructured", "4:8", "2:4"]
@@ -108,24 +116,12 @@ def main(
         assert pruning_ratio == 0.5, "sparsity ratio must be 0.5 for structured N:M sparsity"
         prune_n, prune_m = map(int, sparsity_type.split(":"))
 
-    print(f"loading llm model {base_model}")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map=device
+    # Load the finetuned model and the corresponding tokenizer
+    config, model, tokenizer = load_llama_model(
+        base_model, attention_type=attention_type, device="cuda" if IS_CUDA_AVAILABLE else "cpu"
     )
-    model.seqlen = model.config.max_position_embeddings
-    model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
-    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-
-    print(f"Original Model: {base_model} loaded")
-    count_flops_macs_params(model, tokenizer, print_results=True)
     original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
-
-    if (
-        "30b" in base_model or "65b" in base_model or "70b" in base_model
-    ):  # for 30b and 65b we use device_map to load onto multiple A6000 GPUs, thus the processing here.
-        device = model.hf_device_map["lm_head"]
-    print("use device ", device)
+    model.seqlen = model.config.max_position_embeddings
 
     if pruning_ratio != 0:
         # WARNING: Patch load_dataset to fix C4 loading issue, see load_datasets_fix docstring

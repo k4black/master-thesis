@@ -5,6 +5,8 @@ import torch.nn as nn
 from torch.utils.hooks import RemovableHandle
 from transformers import PreTrainedModel
 
+from adaptive_pruning.utils import get_base_model
+
 
 def _register_pre_mask(module: nn.Module, mask: torch.Tensor, extra_mask: torch.Tensor | None) -> RemovableHandle:
     # Note: It is important to have separate function to limit shadowing of the inputs variable, e.g. layer
@@ -51,7 +53,7 @@ def inject_attention_head_mask(
     :param head_mask: The attention head mask to inject of shape [num_hidden_layers, num_attention_heads]
     :param extra_mask: An additional mask to apply to
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     removable_handles = []
     attention_head_size = model.config.hidden_size // model.config.num_attention_heads
 
@@ -113,7 +115,7 @@ def inject_attention_layer_mask(
     :param layer_mask: The attention layer mask to inject of shape [num_hidden_layers]
     :param extra_mask: An additional mask to apply to
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     removable_handles = []
 
     for layer in range(model.config.num_hidden_layers):
@@ -152,7 +154,7 @@ def inject_ffn_neuron_mask(
     :param neuron_mask: The feed forward neuron mask to inject of shape [num_hidden_layers, intermediate_size]
     :param extra_mask: An additional mask to apply to
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     removable_handles = []
 
     for layer in range(model.config.num_hidden_layers):
@@ -189,7 +191,7 @@ def inject_ffn_layer_mask(
     :param layer_mask: The feed forward layer mask to inject of shape [num_hidden_layers]
     :param extra_mask: An additional mask to apply to
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     removable_handles = []
 
     for layer in range(model.config.num_hidden_layers):
@@ -227,7 +229,7 @@ def inject_hidden_state_mask(
     :param hidden_state_mask: The hidden state mask to inject of shape [hidden_size]
     :param extra_mask: An additional mask to apply to
     """
-    model, architecture = model.base_model, model.config.model_type
+    model, architecture = get_base_model(model), model.config.model_type
     removable_handles = []
 
     if architecture == "bert":
