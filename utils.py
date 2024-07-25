@@ -95,16 +95,18 @@ def create_neptune_run(
     calibration_how_to_collect: str,  # gradients, activations, etc.
     calibration_how_to_average: str,  # mean, fisher_info, entropy, etc.
     calibration_how_to_overlap: str,  # fixed, relative, etc.
+    prune_before_training: bool = False,
     save_model_as: str | None = None,
     pruning_round_to: int | None = None,
     attention_type: str | None = None,
+    pytorch_compile: bool = False,
     finetuning: bool = False,
     finetuning_dataset: str | None = None,
     finetuning_dataset_size: int | None = None,
     finetuning_batch_size: int | None = None,
     finetuning_num_samples: int | None = None,
     finetuning_learning_rate: float | None = None,
-    finetuning_epochs: float | None = None,
+    finetuning_epochs: float = 0,
     *,
     extra_tags: list[str] | None = None,
 ) -> neptune.Run:
@@ -135,8 +137,10 @@ def create_neptune_run(
         "calibration_how_to_collect": calibration_how_to_collect,
         "calibration_how_to_average": calibration_how_to_average,
         "calibration_how_to_overlap": calibration_how_to_overlap,
+        "prune_before_training": prune_before_training,
         "attention_type": attention_type,
         "save_model_as": save_model_as,
+        "compile": pytorch_compile,
         "finetuning": finetuning,
         "finetuning_dataset": finetuning_dataset,
         "finetuning_dataset_size": finetuning_dataset_size,

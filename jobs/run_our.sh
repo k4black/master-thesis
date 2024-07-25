@@ -69,57 +69,31 @@ round_to=256
 
 
 
-#python run_our.py \
-#    --base-model=$base_model_name \
-#    --pruning-components "attn_heads+ffn_neurons" \
-#    --pruning-ratio 0.3 \
-#    --batch-size 8 \
-#    --how-to-collect "grads" \
-#    --how-to-average "fisher_info" \
-#    --how-to-overlap "fixed" \
-#    --num-train-epochs 0 \
-#    --num-iterations 1 \
-#    --evaluate-on="perplexity+short+bias"
-
-python run_our.py \
-    --base-model=$base_model_name \
-    --pruning-components "attn_heads+ffn_neurons" \
-    --pruning-ratio 0.0 \
-    --batch-size 8 \
-    --how-to-collect "grads" \
-    --how-to-average "fisher_info" \
-    --how-to-overlap "fixed" \
-    --num-train-epochs 0 \
-    --num-iterations 1 \
-    --evaluate-on="perplexity+short+bias"
-
 iterations_list="1 4 16"
 for num_iterations in $iterations_list; do
     echo "-->>> >>> Number of Iterations: $num_iterations <<< <<<--"
+    python run_our.py \
+        --base-model=$base_model_name \
+        --pruning-components "attn_heads+ffn_neurons" \
+        --pruning-ratio 0.5 \
+        --batch-size 8 \
+        --round-to 128 \
+        --no-prune-before-training \
+        --num-train-epochs 0 \
+        --num-iterations $num_iterations \
+        --evaluate-on="perplexity+short+bias"
+    echo "[END] - Finish Pruning Model ($num_iterations)"
 
     echo "[START] - Start Pruning Model ($num_iterations)"
     python run_our.py \
         --base-model=$base_model_name \
         --pruning-components "attn_heads+ffn_neurons" \
-        --pruning-ratio 0.3 \
+        --pruning-ratio 0.5 \
         --batch-size 8 \
-        --how-to-collect "grads" \
-        --how-to-average "fisher_info" \
-        --how-to-overlap "fixed" \
-        --num-train-epochs 1 \
+        --round-to 128 \
+        --prune-before-training \
+        --num-train-epochs 0.5 \
         --num-iterations $num_iterations \
         --evaluate-on="perplexity+short+bias"
     echo "[END] - Finish Pruning Model ($num_iterations)"
 done
-
-python run_our.py \
-    --base-model=$base_model_name \
-    --pruning-components "attn_heads+ffn_neurons" \
-    --pruning-ratio 0 \
-    --batch-size 8 \
-    --how-to-collect "grads" \
-    --how-to-average "fisher_info" \
-    --how-to-overlap "fixed" \
-    --num-train-epochs 1 \
-    --num-iterations 1 \
-    --evaluate-on="perplexity+short+bias"

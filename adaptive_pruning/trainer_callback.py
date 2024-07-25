@@ -12,13 +12,6 @@ from adaptive_pruning.importance import (
     collect_mask_gradients,
     get_insert_pruning_masks,
 )
-from adaptive_pruning.pruning import (
-    prune_attention_heads,
-    prune_attention_layers,
-    prune_ffn_layers,
-    prune_ffn_neurons,
-    prune_hidden_states,
-)
 from adaptive_pruning.utils import tensor_to_list
 
 
@@ -44,6 +37,7 @@ class PruningTrainerCallback(TrainerCallback):
         round_to: int = 1,  # at the very end, the very last pruning round only
         num_epochs: float | None = None,  # have to be < than num_train_epochs, default to
         num_iterations: int = 1,  # number of pruning steps across the pruning_num_epochs
+        prune_before_training: bool = False,
         *,
         neptune_run: neptune.Run = None,
     ):
@@ -57,6 +51,7 @@ class PruningTrainerCallback(TrainerCallback):
         self.num_iterations = num_iterations
         self.neptune_run = neptune_run
         self.is_uniform = is_uniform
+        self.prune_before_training = prune_before_training
 
         self.data_loader = data_loader
 
@@ -64,10 +59,12 @@ class PruningTrainerCallback(TrainerCallback):
         self._current_pruned_ratio = 0.0
         self._max_pruning_step = None
         self._fake_pruning_masks = {}
-        self._pruned_components: ComponentsToPrune = None
+        self._pruned_components: ComponentsToPrune | None = None
         self._fake_pruning_hooks = []
         self._pruning_step_to_share = {}
         self._model = None
+
+        self._did_pruning = False
 
     @property
     def pruning_masks(self) -> dict:
@@ -108,9 +105,9 @@ class PruningTrainerCallback(TrainerCallback):
             steps_between_pruning = max_pruning_step // self.num_iterations
             share_to_prune = self.target_ratio / self.num_iterations
             self._pruning_step_to_share = {
-                i * steps_between_pruning: share_to_prune for i in range(self.num_iterations)
+                (i + 1) * steps_between_pruning: share_to_prune for i in range(self.num_iterations)
             }
-            self._max_pruning_step = (self.num_iterations - 1) * steps_between_pruning
+            self._max_pruning_step = self.num_iterations * steps_between_pruning
 
         # create masks for the model and insert the hooks
         self._fake_pruning_masks, self._fake_pruning_hooks = get_insert_pruning_masks(self._model, require_grads=False)
@@ -127,22 +124,26 @@ class PruningTrainerCallback(TrainerCallback):
         print(f"PRUNING: max pruning step {self._max_pruning_step}, ")
         print(f"PRUNING: pruning schedule {self._pruning_step_to_share}")
 
-    def _fake_prune_model(self, to_prune: float, round_to: int, step_id: int = 0) -> None:
+    def _fake_prune_model(self, to_prune: float, round_to: int, step_id: int = 0, optimizer=None) -> None:
         """
         Zero-out masks in the model to simulate pruning.
         """
         # collect the gradients
+        # TODO: temp skip info collection
         components_info: ComponentsInfo = collect_mask_gradients(
             model=self._model,
             dataloader=self.data_loader,
-            pruning_masks_hooks=None,  # create new masks each time to avoid the error with _fake_pruning_masks
-            remove_hooks=False,
+            tuple_pruning_masks_hooks=None,  # create new masks each time to avoid the error with _fake_pruning_masks
+            remove_hooks=True,
         )
+        if optimizer:
+            optimizer.zero_grad()
         # get importance of the components and select the components to prune
         components_importance = ComponentsImportance.from_info(components_info, how_to_average=self.average)
 
         # Select the components to prune, first skip pruned components by set Importances to Inf
         # TODO: fix the skip_pruned_components
+        assert self._pruned_components, "The _pruned_components have to be initialized"
         components_importance.attention_layers_importance[self._pruned_components.attention_layers_to_prune] = float(
             "inf"
         )
@@ -161,25 +162,26 @@ class PruningTrainerCallback(TrainerCallback):
             is_uniform=self.is_uniform,
             how_to_overlap=self.overlap,
             config=self._model.config,
+            # TODO: skip here, without setting to inf
             # skip_pruned_components=self._pruned_components,
         )
 
         # prune the model (fake, just nullify the mask)
         if "attn_heads" in self.components:
             for layer, heads in components_to_prune.attention_heads_to_prune.items():
-                self._fake_pruning_masks[f"attn_heads"][layer, heads] = 0.0
+                self._fake_pruning_masks["attn_heads"][layer, heads] = 0.0
         if "attn_layers" in self.components:
             layers = components_to_prune.attention_layers_to_prune
-            self._fake_pruning_masks[f"attn_layers"][layers] = 0.0
+            self._fake_pruning_masks["attn_layers"][layers] = 0.0
         if "ffn_neurons" in self.components:
             for layer, neurons in components_to_prune.ffn_neurons_to_prune.items():
-                self._fake_pruning_masks[f"ffn_neurons"][layer, neurons] = 0.0
+                self._fake_pruning_masks["ffn_neurons"][layer, neurons] = 0.0
         if "ffn_layers" in self.components:
             layers = components_to_prune.ffn_layers_to_prune
-            self._fake_pruning_masks[f"ffn_layers"][layers] = 0.0
+            self._fake_pruning_masks["ffn_layers"][layers] = 0.0
         if "hidden_states" in self.components:
             states = components_to_prune.hidden_states_to_prune
-            self._fake_pruning_masks[f"hidden_states"][states] = 0.0
+            self._fake_pruning_masks["hidden_states"][states] = 0.0
 
         # update _pruned_components, extend the pruned components
         for layer, heads in components_to_prune.attention_heads_to_prune.items():
@@ -198,6 +200,8 @@ class PruningTrainerCallback(TrainerCallback):
                 self.neptune_run[f"pruning/step_{step_id}_{name}"].upload(File.as_pickle(tensor_to_list(value)))
             for name, value in components_importance._asdict().items():
                 self.neptune_run[f"pruning/step_{step_id}_{name}"].upload(File.as_pickle(tensor_to_list(value)))
+            for name, value in components_to_prune._asdict().items():
+                self.neptune_run[f"pruning/step_{step_id}_{name}"].upload(File.as_pickle(value))
 
     def on_init_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs) -> None:
         """See _init_pruning_params"""
@@ -210,39 +214,39 @@ class PruningTrainerCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> None:
-        print("ON TRAIN BEGIN")
         assert "model" in kwargs, "The model and tokenizer have to be passed to the callback"
         self._init_pruning_params(args, state, kwargs["model"])
 
-        # prune the model at the beginning (0th step)
-        if 0 in self._pruning_step_to_share:
-            to_prune = self._pruning_step_to_share[0]
-            round_to = self.round_to if 0 == self._max_pruning_step else 1
-            # verbose the pruning
-            print(
-                f"PRUNING: step 0/{state.max_steps} (max {self._max_pruning_step}), "
-                f"pruning now {to_prune:.1%} (total {self._current_pruned_ratio + to_prune:.1%}), round to {round_to}"
-            )
-            # prune the model
-            self._fake_prune_model(to_prune, round_to, step_id=0)
+        # if have no epochs/do_train=False but iteratios >= 1, prune the model at the beginning in multiple steps
+        if state.num_train_epochs == 0 or self.prune_before_training is False:
+            self._did_pruning = True
+            for _, to_prune in self._pruning_step_to_share.items():
+                # verbose the pruning
+                print(
+                    f"PRUNING: step 0*/{state.max_steps} (max {self._max_pruning_step}), "
+                    f"pruning now {to_prune:.1%} (total {self._current_pruned_ratio + to_prune:.1%}), round to {self.round_to}"
+                )
+                # prune the model
+                self._fake_prune_model(to_prune, self.round_to, step_id=0, optimizer=kwargs.get("optimizer"))
 
     def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs) -> None:
-        print("ON STEP BEGIN")
         # check if it is time to prune (0th step is pruned in on_train_begin)
-        if state.global_step in self._pruning_step_to_share and state.global_step != 0:
+        if state.global_step in self._pruning_step_to_share and not self._did_pruning:
             # get the percent to prune this round
             to_prune = self._pruning_step_to_share[state.global_step]
-            # if it is the last round, round_to the target ratio
-            round_to = self.round_to if state.global_step == self._max_pruning_step else 1
 
             # verbose the pruning
             print(
                 f"PRUNING: step {state.global_step}/{state.max_steps} (max {self._max_pruning_step}), "
-                f"pruning now {to_prune:.1%} (total {self._current_pruned_ratio + to_prune:.1%}), round to {round_to}"
+                f"pruning now {to_prune:.1%} (total {self._current_pruned_ratio + to_prune:.1%}), round to {self.round_to}"
             )
 
             # prune the model
-            self._fake_prune_model(to_prune, round_to, step_id=state.global_step)
+            self._fake_prune_model(
+                to_prune, self.round_to, step_id=state.global_step, optimizer=kwargs.get("optimizer")
+            )
+
+        self._model.zero_grad()
 
     def on_optimizer_step(
         self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs

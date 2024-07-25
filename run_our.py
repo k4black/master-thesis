@@ -7,7 +7,6 @@ from typing import Optional
 import neptune
 import torch
 import typer
-from neptune.types import File
 from peft import LoraConfig, LoraModel, PeftModel, PeftModelForCausalLM, get_peft_model, prepare_model_for_kbit_training
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling, Trainer, TrainingArguments
@@ -58,10 +57,11 @@ def main(
     pruning_ratio: float = 0.5,
     num_samples: int = 256,
     num_iterations: int = 1,
-    num_train_epochs: int = 0,
+    num_train_epochs: float = 0.1,
+    prune_before_training: bool = False,
     round_to: int = 1,
     seed: int = 42,
-    evaluate_on: Optional[str] = "perplexity+full+bias",
+    evaluate_on: Optional[str] = "perplexity+short+bias",
     save_model_as: Optional[str] = None,
     extra_tags: Optional[str] = None,  # split by +
 ) -> None:
@@ -96,11 +96,13 @@ def main(
         calibration_how_to_collect=how_to_collect,
         calibration_how_to_average=how_to_average,
         calibration_how_to_overlap=how_to_overlap,
+        prune_before_training=prune_before_training,
         attention_type=attention_type,
         save_model_as=save_model_as,
-        extra_tags=["our"] if not extra_tags else ["our"] + extra_tags.split("+"),
-        finetuning=num_train_epochs != 0,
+        finetuning=num_train_epochs > 0,
         finetuning_epochs=num_train_epochs,
+        finetuning_dataset="alpaca-gpt4",
+        extra_tags=["our"] if not extra_tags else ["our"] + extra_tags.split("+"),
     )
 
     # Load the finetuned model and the corresponding tokenizer
@@ -108,26 +110,15 @@ def main(
         base_model, attention_type=attention_type, device="cuda" if IS_CUDA_AVAILABLE else "cpu"
     )
 
-    config = LoraConfig(
-        r=8,
-        lora_alpha=16,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    # from peft import get_peft_model
-    model = prepare_model_for_kbit_training(model)
-    model = get_peft_model(model, config, mixed=False)
-    model.print_trainable_parameters()
-
     original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
     calibration_dataset = get_tokenized_dataset(pruning_dataset, "train", tokenizer, num_samples, 128, streaming=True)
-    train_dataset = get_tokenized_dataset("alpaca-gpt4", "train", tokenizer, streaming=False)
-    validation_dataset = get_tokenized_dataset("wikitext2", "validation", tokenizer, seq_len=128, streaming=False)
+    train_dataset = get_tokenized_dataset("alpaca-gpt4", "train", tokenizer, streaming=False, seq_len=512)
+    validation_dataset = get_tokenized_dataset(
+        "wikitext2", "validation", tokenizer, seq_len=512, streaming=False, n_samples=1000, drop_empty_strings=True
+    )
     collate_fn = DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=8)
 
     calibration_dataloader = DataLoader(
@@ -158,25 +149,48 @@ def main(
     # else:
     #     assert False, f"Unknown how_to_collect: {how_to_collect}"
 
+    print("\n==================SETUP TRAINER==================\n")
+    if num_train_epochs > 0:
+        peft_config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+            init_lora_weights="olora",
+        )
+        # from peft import get_peft_model
+        model = prepare_model_for_kbit_training(model)
+        model = get_peft_model(model, peft_config, mixed=False)
+        model.print_trainable_parameters()
+
     trainer_args = TrainingArguments(
         output_dir="./results/our",
         report_to="none",
         learning_rate=1e-4,
-        weight_decay=0.01,
-        warmup_ratio=0.01,
+        weight_decay=0.001,
+        warmup_ratio=0.05,
+        gradient_accumulation_steps=1,
+        # max_grad_norm=0.3,
         num_train_epochs=num_train_epochs,
         optim="adamw_torch",
         auto_find_batch_size=True,
         per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
+        per_device_eval_batch_size=4,
         group_by_length=True,
-        logging_steps=10,
-        save_steps=100,
+        logging_steps=100,
+        eval_steps=200 if validation_dataset else None,
+        save_steps=200,
         save_total_limit=1,
         load_best_model_at_end=False,
         fp16=IS_CUDA_AVAILABLE,
         fp16_full_eval=IS_CUDA_AVAILABLE,
         use_mps_device=False,
+        eval_strategy="steps",
+        save_strategy="steps",
+        eval_on_start=True,
+        seed=seed,
     )
     pruning_callback = PruningTrainerCallback(
         target_ratio=pruning_ratio,
@@ -190,6 +204,7 @@ def main(
         num_epochs=num_train_epochs,  # TODO: select different epochs for pruning
         num_iterations=num_iterations,
         neptune_run=neptune_run,
+        prune_before_training=prune_before_training,
     )
     trainer = Trainer(
         model=model,
@@ -203,13 +218,12 @@ def main(
     print("\n==================TRAINING + FIND PRUNING==================\n")
     # Train the model
     trainer.train()
-
     # Re-run neptune run as Trainer stops it
     neptune_run = neptune.init_run(with_id=neptune_run._sys_id)
 
     print("\n==================SAVE LOAD MODEL==================\n")
     # Save the trained adapters
-    model.to(device="cpu", dtype=torch.float32)
+    model = model.to(device="cpu", dtype=torch.float32)
     del trainer
 
     # merge the LoRA adapters if any

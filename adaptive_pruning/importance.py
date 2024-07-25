@@ -131,15 +131,29 @@ def get_insert_pruning_masks(
     # create masks for the model
     pruning_masks = {
         "attn_heads": torch.ones(
-            model.config.num_hidden_layers, model.config.num_attention_heads, device=model.device, dtype=dtype
+            model.config.num_hidden_layers,
+            model.config.num_attention_heads,
+            device=model.device,
+            dtype=dtype,
+            requires_grad=require_grads,
         ),
         "ffn_neurons": torch.ones(
-            model.config.num_hidden_layers, model.config.intermediate_size, device=model.device, dtype=dtype
+            model.config.num_hidden_layers,
+            model.config.intermediate_size,
+            device=model.device,
+            dtype=dtype,
+            requires_grad=require_grads,
         ),
-        "ffn_layers": torch.ones(model.config.num_hidden_layers, device=model.device, dtype=dtype),
-        "attn_layers": torch.ones(model.config.num_hidden_layers, device=model.device, dtype=dtype),
-        "hidden_states": torch.ones(model.config.hidden_size, device=model.device, dtype=dtype),
-        "meta": torch.ones(5, device=model.device, dtype=dtype),
+        "ffn_layers": torch.ones(
+            model.config.num_hidden_layers, device=model.device, dtype=dtype, requires_grad=require_grads
+        ),
+        "attn_layers": torch.ones(
+            model.config.num_hidden_layers, device=model.device, dtype=dtype, requires_grad=require_grads
+        ),
+        "hidden_states": torch.ones(
+            model.config.hidden_size, device=model.device, dtype=dtype, requires_grad=require_grads
+        ),
+        "meta": torch.ones(5, device=model.device, dtype=dtype, requires_grad=require_grads),
     }
 
     for name, mask in pruning_masks.items():
@@ -160,7 +174,7 @@ def get_insert_pruning_masks(
 def collect_mask_gradients(
     model: PreTrainedModel,
     dataloader: DataLoader,
-    pruning_masks_hooks: tuple[dict[str, torch.Tensor], list[RemovableHandle]] | None = None,
+    tuple_pruning_masks_hooks: tuple[dict[str, torch.Tensor], list[RemovableHandle]] | None = None,
     *,
     remove_hooks: bool = True,
     verbose: bool = True,
@@ -169,10 +183,10 @@ def collect_mask_gradients(
     config = model.config
 
     # Insert masks if not provided
-    if pruning_masks_hooks is None:
+    if tuple_pruning_masks_hooks is None:
         pruning_masks, pruning_masks_hooks = get_insert_pruning_masks(model)
     else:
-        pruning_masks, pruning_masks_hooks = pruning_masks_hooks
+        pruning_masks, pruning_masks_hooks = tuple_pruning_masks_hooks
 
     # Create tensors to store the gradients
     gradient_collectors = {
@@ -198,22 +212,33 @@ def collect_mask_gradients(
             gradient_collectors[name] = torch.cat(
                 [gradient_collectors[name], pruning_masks[name].grad.detach().unsqueeze(0)], dim=0
             )
-            pruning_masks[name].grad = None
+            pruning_masks[name].detach_()
 
     # clear graph, clear grads
+    model.zero_grad(set_to_none=True)
     for param in model.parameters():
         param.grad = None
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+    for mask in pruning_masks.values():
+        mask.requires_grad_(False)
+        mask.detach_()
+        mask.grad = None
     # remove masks from the model
     if remove_hooks:
         for handle in pruning_masks_hooks:
             handle.remove()
+        if not tuple_pruning_masks_hooks:
+            for name in pruning_masks.keys():
+                pruning_masks[name].requires_grad_(False)
+                pruning_masks[name].detach_()
+                gradient_collectors[name].detach_()
+            del pruning_masks
+
+    # clear cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     # disable grad
-    for name in pruning_masks.keys():
-        pruning_masks[name].requires_grad_(False)
     model.train()
 
     return ComponentsInfo(
