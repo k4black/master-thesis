@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import copy
 import math
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -36,7 +37,11 @@ class ComponentsImportance(NamedTuple):
     meta_importance: torch.Tensor  # [5] - attn_heads, attn_layers, ffn_neurons, ffn_layers, hidden_state
 
     @classmethod
-    def from_info(cls, components_info: ComponentsInfo, how_to_average: str) -> ComponentsImportance:
+    def from_info(
+        cls,
+        components_info: ComponentsInfo,
+        how_to_average: Literal["fisher_info", "mean", "max", "entropy", "minus_entropy"],
+    ) -> ComponentsImportance:
         if how_to_average == "fisher_info":
             components_importance = info_to_fisher(components_info)
         elif how_to_average == "mean":
@@ -63,18 +68,54 @@ class ComponentsToPrune(NamedTuple):
     def from_importance(
         cls,
         components_importance: ComponentsImportance,
-        pruning_ratio: float,
+        pruning_ratio_target: float,
         pruning_components: list[str],  # ["attn_heads", "attn_layers", "ffn_layers", "ffn_neurons", "hidden_states"]
         round_to: int,
         is_uniform: bool,
         how_to_overlap: str,  # ["fixed", "relative", "meta"]
         config: PretrainedConfig,
-        skip_pruned_components: ComponentsToPrune | None = None,
+        already_pruned_components: ComponentsToPrune | None = None,
     ) -> ComponentsToPrune:
-        # get ratios to prune
+        # get target ratios to prune
         attn_heads_ratio, attn_layers_ratio, ffn_neurons_ratio, ffn_layers_ratio, hidden_states_ratio = (
-            get_components_ratios(pruning_ratio, pruning_components, how_to_overlap, components_importance)
+            get_components_ratios(pruning_ratio_target, pruning_components, how_to_overlap, components_importance)
         )
+
+        # adjust rations to round_to and already pruned components
+        total_attn_heads = config.num_hidden_layers * config.num_attention_heads
+        total_attn_layers = config.num_hidden_layers
+        total_ffn_neurons = config.num_hidden_layers * config.intermediate_size
+        total_ffn_layers = config.num_hidden_layers
+        total_hidden_states = config.hidden_size
+        if already_pruned_components:
+            current_attn_heads_ratio = (
+                sum(len(v) for v in already_pruned_components.attention_heads_to_prune.values()) / total_attn_heads
+            )
+            current_attn_layers_ratio = len(already_pruned_components.attention_layers_to_prune) / total_attn_layers
+            current_ffn_neurons_ratio = (
+                sum(len(v) for v in already_pruned_components.ffn_neurons_to_prune.values()) / total_ffn_neurons
+            )
+            current_ffn_layers_ratio = len(already_pruned_components.ffn_layers_to_prune) / total_ffn_layers
+            current_hidden_states_ratio = len(already_pruned_components.hidden_states_to_prune) / total_hidden_states
+
+            attn_heads_ratio = max(attn_heads_ratio - current_attn_heads_ratio, 0)
+            attn_layers_ratio = max(attn_layers_ratio - current_attn_layers_ratio, 0)
+            ffn_neurons_ratio = max(ffn_neurons_ratio - current_ffn_neurons_ratio, 0)
+            ffn_layers_ratio = max(ffn_layers_ratio - current_ffn_layers_ratio, 0)
+            hidden_states_ratio = max(hidden_states_ratio - current_hidden_states_ratio, 0)
+
+        # Skip pruned components
+        if already_pruned_components:
+            # Temporary put INF values to skip pruned components
+            inf = float("inf")
+            components_importance = copy.deepcopy(components_importance)
+            for layer, heads in already_pruned_components.attention_heads_to_prune.items():
+                components_importance.attention_heads_importance[layer, heads] = inf
+            components_importance.attention_layers_importance[already_pruned_components.attention_layers_to_prune] = inf
+            for layer, neurons in already_pruned_components.ffn_neurons_to_prune.items():
+                components_importance.ffn_neurons_importance[layer, neurons] = inf
+            components_importance.ffn_layers_importance[already_pruned_components.ffn_layers_to_prune] = inf
+            components_importance.hidden_states_importance[already_pruned_components.hidden_states_to_prune] = inf
 
         # Select components to prune
         attention_layers_to_prune = select_to_prune_attention_layers(
@@ -87,7 +128,8 @@ class ComponentsToPrune(NamedTuple):
             attn_heads_ratio,
             uniform_among_layers=is_uniform,
             key_value_group_size=config.num_attention_heads // config.num_key_value_heads,
-            round_to_heads=(round_to // head_size) or 1,
+            # round_to_heads=(round_to // head_size) or 1,
+            round_to_heads=1,
         )
         attention_heads_to_prune = {
             layer: heads for layer, heads in attention_heads_to_prune.items() if layer not in attention_layers_to_prune
@@ -102,6 +144,7 @@ class ComponentsToPrune(NamedTuple):
             ffn_neurons_ratio,
             uniform_among_layers=is_uniform,
             round_to=round_to,
+            round_to_lower=True,
         )
         neurons_to_prune = {
             layer: neurons for layer, neurons in neurons_to_prune.items() if layer not in attention_layers_to_prune
@@ -111,6 +154,12 @@ class ComponentsToPrune(NamedTuple):
             hidden_states_ratio,
             round_to=round_to,
         )
+
+        # Do not include empty dicts
+        if all(len(v) == 0 for v in attention_heads_to_prune.values()):
+            attention_heads_to_prune = {}
+        if all(len(v) == 0 for v in neurons_to_prune.values()):
+            neurons_to_prune = {}
 
         return ComponentsToPrune(
             attention_heads_to_prune,
@@ -176,7 +225,6 @@ def collect_mask_gradients(
     dataloader: DataLoader,
     tuple_pruning_masks_hooks: tuple[dict[str, torch.Tensor], list[RemovableHandle]] | None = None,
     *,
-    remove_hooks: bool = True,
     verbose: bool = True,
 ) -> ComponentsInfo:
     batch_iterator = tqdm(dataloader, total=len(dataloader), desc="Collecting grads") if verbose else dataloader
@@ -223,7 +271,7 @@ def collect_mask_gradients(
         mask.detach_()
         mask.grad = None
     # remove masks from the model
-    if remove_hooks:
+    if tuple_pruning_masks_hooks is None:
         for handle in pruning_masks_hooks:
             handle.remove()
         if not tuple_pruning_masks_hooks:
@@ -551,7 +599,7 @@ def select_to_prune_attention_heads(
     uniform_among_layers: bool = False,
     key_value_group_size: int = 1,
     round_to_heads: int = 1,
-    keep_at_least_one_head: bool = True,
+    keep_at_least_one_head: bool = False,
 ) -> dict[int, list[int]]:
     """
     Select least-k attention heads based on the importance scores.
@@ -580,54 +628,56 @@ def select_to_prune_attention_heads(
             importance_scores.size(0), importance_scores.size(1) // key_value_group_size, key_value_group_size
         ).mean(dim=-1)
 
-    heads_to_prune = {}
-    num_layers, num_heads = importance_scores.size()
+    heads_grouped_to_prune = {}
+    num_layers, num_heads_grouped = importance_scores.size()
 
     if uniform_among_layers:
-        num_heads_to_prune = int(num_heads * percent_heads_to_prune)
-        num_heads_to_prune = round(num_heads_to_prune / round_to_heads) * round_to_heads
-        num_heads_to_prune = min(num_heads_to_prune, num_heads)
+        num_heads_grouped_to_prune = int(num_heads_grouped * percent_heads_to_prune)
+        num_heads_grouped_to_prune = round(num_heads_grouped_to_prune / round_to_heads) * round_to_heads
+        num_heads_grouped_to_prune = min(num_heads_grouped_to_prune, num_heads_grouped)
 
         for layer_index in range(num_layers):
             # sort heads by importance
             importance_scores_layer = importance_scores[layer_index]
             _, sorted_indices = importance_scores_layer.sort()
-            heads_to_prune_layer = sorted_indices[:num_heads_to_prune].tolist()
-            heads_to_prune[layer_index] = heads_to_prune_layer
+            heads_to_prune_layer = sorted_indices[:num_heads_grouped_to_prune].tolist()
+            heads_grouped_to_prune[layer_index] = heads_to_prune_layer
 
     else:
-        num_heads_to_prune = int(num_layers * num_heads * percent_heads_to_prune)
+        num_heads_grouped_to_prune_total = int(num_layers * num_heads_grouped * percent_heads_to_prune)
 
         # sort heads by importance
         importance_scores_flatten = importance_scores.view(-1)
         _, sorted_indices = importance_scores_flatten.sort()
-        heads_to_prune_flatten = sorted_indices[:num_heads_to_prune]
+        heads_to_prune_flatten = sorted_indices[:num_heads_grouped_to_prune_total]
 
         # convert to layer-head indices
         for head_index in heads_to_prune_flatten:
             head_index = int(head_index.item())
-            layer_index = head_index // num_heads
-            head_index = head_index % num_heads
-            heads_to_prune.setdefault(layer_index, []).append(head_index)
+            layer_index = head_index // num_heads_grouped
+            head_index = head_index % num_heads_grouped
+            heads_grouped_to_prune.setdefault(layer_index, []).append(head_index)
 
         # round to the nearest round_to_heads for each layer (drop excess heads)
-        for layer, heads in heads_to_prune.items():
+        for layer, heads in heads_grouped_to_prune.items():
             num_heads_to_prune_layer = len(heads)
             num_heads_to_prune_layer = math.floor(num_heads_to_prune_layer / round_to_heads) * round_to_heads
-            heads_to_prune[layer] = heads[:num_heads_to_prune_layer]
+            heads_grouped_to_prune[layer] = heads[:num_heads_to_prune_layer]
 
     # keep at least 1 head per layer (or round_to_heads), remove unused heads_to_prune lists
     if keep_at_least_one_head:
-        for layer in list(heads_to_prune.keys()):
-            if len(heads_to_prune[layer]) == num_heads:
-                heads_to_prune[layer] = heads_to_prune[layer][: num_heads - round_to_heads]
-            if len(heads_to_prune[layer]) == 0:
-                del heads_to_prune[layer]
+        for layer in list(heads_grouped_to_prune.keys()):
+            if len(heads_grouped_to_prune[layer]) == num_heads_grouped:
+                heads_grouped_to_prune[layer] = heads_grouped_to_prune[layer][: num_heads_grouped - round_to_heads]
+            if len(heads_grouped_to_prune[layer]) == 0:
+                del heads_grouped_to_prune[layer]
 
     # expand the grouped heads to the original size
-    if key_value_group_size != 1:
+    if key_value_group_size == 1:
+        heads_to_prune = heads_grouped_to_prune
+    else:
         heads_to_prune_expanded = {}
-        for layer, heads in heads_to_prune.items():
+        for layer, heads in heads_grouped_to_prune.items():
             heads_expanded = [i * key_value_group_size + j for i in heads for j in range(key_value_group_size)]
             heads_to_prune_expanded[layer] = heads_expanded
         heads_to_prune = heads_to_prune_expanded
@@ -665,6 +715,7 @@ def select_to_prune_ffn_neurons(
     percent_neurons_to_prune: float,
     uniform_among_layers: bool = False,
     round_to: int = 1,
+    round_to_lower: bool = False,
 ) -> dict[int, list[int]]:
     """
     Select least-k feed forward neurons based on the importance scores.
@@ -673,6 +724,7 @@ def select_to_prune_ffn_neurons(
     :param percent_neurons_to_prune: The percentage of feed forward neurons to keep
     :param uniform_among_layers: If True, prune the same number of neurons from each layer
     :param round_to: The number of neurons to group together for pruning (round to the nearest round_to) for gpu opts
+    :param round_to_lower: If True, round to the lower number of neurons
     :return: A dictionary with the layer indices as keys and a list of neuron indices to prune as values
     """
     assert 0 <= percent_neurons_to_prune <= 1, "percent_neurons_to_prune should be in [0, 1]"
@@ -682,7 +734,10 @@ def select_to_prune_ffn_neurons(
 
     if uniform_among_layers:
         num_neurons_to_prune = int(num_neurons * percent_neurons_to_prune)
-        num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
+        if round_to_lower:
+            num_neurons_to_prune = math.floor(num_neurons_to_prune / round_to) * round_to
+        else:
+            num_neurons_to_prune = round(num_neurons_to_prune / round_to) * round_to
         num_neurons_to_prune = min(num_neurons_to_prune, num_neurons)
 
         for layer_index in range(num_layers):
@@ -785,7 +840,7 @@ def get_components_ratios(
     hidden_states_ratio = pruning_ratio if "hidden_states" in pruning_components else 0.0
 
     if how_to_overlap == "fixed":
-        return (attention_heads_ratio, attention_layers_ratio, ffn_neurons_ratio, ffn_layers_ratio, hidden_states_ratio)
+        return attention_heads_ratio, attention_layers_ratio, ffn_neurons_ratio, ffn_layers_ratio, hidden_states_ratio
 
     elif how_to_overlap == "fixed_x1_x15_x05":
         # x1 attn heads, x1.5 neurons, x0.5 hidden states

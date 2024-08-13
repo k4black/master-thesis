@@ -3,11 +3,12 @@ from typing import Callable
 import pytest
 import torch
 from torch.utils.data import DataLoader
-from transformers import PreTrainedModel
+from transformers import PretrainedConfig, PreTrainedModel
 
 from adaptive_pruning.importance import (
     ComponentsImportance,
     ComponentsInfo,
+    ComponentsToPrune,
     collect_activations,
     collect_mask_gradients,
     collect_random_numbers,
@@ -64,6 +65,36 @@ class TestInfoTo:
             assert value.shape == (5,), field_name
             # assert torch.all(r >= 0)
 
+    import pytest
+
+    from adaptive_pruning.importance import ComponentsImportance, ComponentsInfo
+
+    @pytest.fixture
+    def example_components_info(self) -> ComponentsInfo:
+        return ComponentsInfo(
+            attention_heads_info=torch.rand(10, 5, 8),  # 10 samples, 5 layers, 8 heads
+            attention_layers_info=torch.rand(10, 5),  # 10 samples, 5 layers
+            ffn_neurons_info=torch.rand(10, 5, 128),  # 10 samples, 5 layers, 128 neurons
+            ffn_layers_info=torch.rand(10, 5),  # 10 samples, 5 layers
+            hidden_states_info=torch.rand(10, 512),  # 10 samples, 512 hidden states
+            meta_info=torch.rand(10, 5),  # 10 samples, 5 meta info
+        )
+
+    @pytest.mark.parametrize("how_to_average", ["fisher_info", "mean", "max", "entropy", "minus_entropy"])
+    def test_from_info(self, example_components_info: ComponentsInfo, how_to_average: str) -> None:
+        components_importance = ComponentsImportance.from_info(example_components_info, how_to_average)  # type: ignore
+
+        # Check if the returned object is an instance of ComponentsImportance
+        assert isinstance(components_importance, ComponentsImportance)
+
+        # Check the shapes of the tensors in the returned ComponentsImportance object
+        assert components_importance.attention_heads_importance.shape == (5, 8)
+        assert components_importance.attention_layers_importance.shape == (5,)
+        assert components_importance.ffn_neurons_importance.shape == (5, 128)
+        assert components_importance.ffn_layers_importance.shape == (5,)
+        assert components_importance.hidden_states_importance.shape == (512,)
+        assert components_importance.meta_importance.shape == (5,)
+
 
 class TestSelectAttentionHeads:
     @pytest.mark.parametrize(
@@ -111,7 +142,9 @@ class TestSelectAttentionHeads:
         percent_heads_to_prune: float,
         expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
-        selected_heads = select_to_prune_attention_heads(importance_scores, percent_heads_to_prune)
+        selected_heads = select_to_prune_attention_heads(
+            importance_scores, percent_heads_to_prune, keep_at_least_one_head=True
+        )
         assert selected_heads == expected_heads_to_prune
 
     @pytest.mark.parametrize(
@@ -134,7 +167,9 @@ class TestSelectAttentionHeads:
         expected_heads_to_prune: dict[int, list[int]],
     ) -> None:
         selected_heads = select_to_prune_attention_heads(
-            importance_scores, percent_heads_to_prune, uniform_among_layers=True
+            importance_scores,
+            percent_heads_to_prune,
+            uniform_among_layers=True,
         )
         assert selected_heads == expected_heads_to_prune
 
@@ -145,7 +180,10 @@ class TestSelectAttentionHeads:
         importance_scores = torch.rand(10, 100)  # 10 layers, 100 heads
         percent_heads_to_prune = 0.231
         selected_heads = select_to_prune_attention_heads(
-            importance_scores, percent_heads_to_prune, round_to_heads=round_to_heads, uniform_among_layers=is_uniform
+            importance_scores,
+            percent_heads_to_prune,
+            round_to_heads=round_to_heads,
+            uniform_among_layers=is_uniform,
         )
 
         for layer, heads in selected_heads.items():
@@ -259,3 +297,116 @@ class TestSelectFnnLayers:
     ) -> None:
         selected_layers = select_to_prune_ffn_layers(importance_scores, percent_layers_to_prune)
         assert selected_layers == expected_layers_to_prune
+
+
+class TestSelectToPrune:
+
+    @pytest.fixture
+    def mock_components_importance(self) -> ComponentsImportance:
+        # Mock data for ComponentsImportance
+        return ComponentsImportance(
+            attention_heads_importance=torch.rand(8, 12),
+            attention_layers_importance=torch.rand(8),
+            ffn_neurons_importance=torch.rand(8, 768),
+            ffn_layers_importance=torch.rand(8),
+            hidden_states_importance=torch.rand(768),
+            meta_importance=torch.rand(5),
+        )
+
+    @pytest.fixture
+    def mock_config(self) -> PretrainedConfig:
+        # Mock PretrainedConfig with specific attributes
+        config = PretrainedConfig(
+            hidden_size=768,
+            num_attention_heads=12,
+            num_hidden_layers=8,
+            intermediate_size=3072,
+            num_key_value_heads=4,
+        )
+        return config
+
+    @pytest.mark.parametrize(
+        "pruning_components",
+        [["attn_heads"], ["attn_layers"], ["ffn_neurons"], ["ffn_layers"], ["hidden_states"]],
+    )
+    def test_from_importance_uniform_pruning(
+        self,
+        mock_components_importance: ComponentsImportance,
+        mock_config: PretrainedConfig,
+        pruning_components: list[str],
+    ):
+        # Test uniform pruning across layers
+        components_to_prune = ComponentsToPrune.from_importance(
+            components_importance=mock_components_importance,
+            pruning_ratio_target=0.5,
+            pruning_components=pruning_components,
+            round_to=1,
+            is_uniform=True,
+            how_to_overlap="fixed",
+            config=mock_config,
+        )
+        # Assertions to verify the correct components are selected for pruning
+        if "attn_heads" in pruning_components:
+            assert len(components_to_prune.attention_heads_to_prune) == 8
+            for layer, heads in components_to_prune.attention_heads_to_prune.items():
+                assert len(heads) == 6
+        else:
+            assert not components_to_prune.attention_heads_to_prune
+        if "attn_layers" in pruning_components:
+            assert len(components_to_prune.attention_layers_to_prune) == 4
+        else:
+            assert not components_to_prune.attention_layers_to_prune
+        if "ffn_neurons" in pruning_components:
+            assert len(components_to_prune.ffn_neurons_to_prune) == 8
+            for layer, neurons in components_to_prune.ffn_neurons_to_prune.items():
+                assert len(neurons) == 384
+        else:
+            assert not components_to_prune.ffn_neurons_to_prune
+        if "ffn_layers" in pruning_components:
+            assert len(components_to_prune.ffn_layers_to_prune) == 4
+        else:
+            assert not components_to_prune.ffn_layers_to_prune
+        if "hidden_states" in pruning_components:
+            assert len(components_to_prune.hidden_states_to_prune) == 384
+        else:
+            assert not components_to_prune.hidden_states_to_prune
+
+    @pytest.mark.parametrize(
+        "pruning_components",
+        [["attn_heads"], ["attn_layers"], ["ffn_neurons"], ["ffn_layers"], ["hidden_states"]],
+    )
+    def test_from_importance_with_skip_pruned_components(
+        self,
+        mock_components_importance: ComponentsImportance,
+        mock_config: PretrainedConfig,
+        pruning_components: list[str],
+    ):
+        # Test behavior when skip_pruned_components is provided
+        skip_pruned_components = ComponentsToPrune(
+            attention_heads_to_prune={0: [1, 2], 1: [3, 4]},
+            attention_layers_to_prune=[1],
+            ffn_neurons_to_prune={2: [100, 200]},
+            ffn_layers_to_prune=[2],
+            hidden_states_to_prune=[10, 20, 30],
+        )
+        components_to_prune = ComponentsToPrune.from_importance(
+            components_importance=mock_components_importance,
+            pruning_ratio_target=0.9,
+            pruning_components=pruning_components,
+            round_to=1,
+            is_uniform=False,
+            how_to_overlap="fixed",
+            config=mock_config,
+            already_pruned_components=skip_pruned_components,
+        )
+        # Assertions to verify that skipped components are not pruned again
+        for i in [1, 2]:
+            assert i not in components_to_prune.attention_heads_to_prune.get(0, [])
+        for i in [3, 4]:
+            assert i not in components_to_prune.attention_heads_to_prune.get(1, [])
+        assert 1 not in components_to_prune.attention_layers_to_prune
+        for i in [100, 200]:
+            assert i not in components_to_prune.ffn_neurons_to_prune.get(2, [])
+        assert 2 not in components_to_prune.ffn_layers_to_prune
+        for i in [10, 20, 30]:
+            assert i not in components_to_prune.hidden_states_to_prune

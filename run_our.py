@@ -49,7 +49,7 @@ def main(
     base_model: str = "TinyLlama/TinyLlama_v1.1",
     attention_type: Optional[str] = "sdpa",
     pruning_dataset: str = "bookcorpus",
-    batch_size: int = 32,
+    batch_size: int = 8,
     how_to_collect: str = "grads",  # grads or activations or random
     how_to_average: str = "fisher_info",  # fisher_info, sum, mean, max or entropy
     how_to_overlap: str = "fixed",  # fixed, relative, meta
@@ -58,6 +58,11 @@ def main(
     num_samples: int = 256,
     num_iterations: int = 1,
     num_train_epochs: float = 0.1,
+    num_prune_epochs: Optional[float] = None,
+    train_batch_size: int = 2,
+    learning_rate: float = 1e-4,
+    training_dtype: str = "fp16",  # int8, int4
+    finetuning_dataset: str = "alpaca-gpt4",
     prune_before_training: bool = False,
     round_to: int = 1,
     seed: int = 42,
@@ -66,6 +71,13 @@ def main(
     extra_tags: Optional[str] = None,  # split by +
 ) -> None:
     set_random_seed(seed)
+
+    if num_train_epochs == 0:
+        prune_before_training = True
+    if not num_prune_epochs:
+        num_prune_epochs = num_train_epochs
+    if prune_before_training:
+        num_prune_epochs = 0
 
     if pruning_components == "all":
         pruning_components = "attn_heads+attn_layers+ffn_neurons+ffn_layers+hidden_state"
@@ -101,33 +113,31 @@ def main(
         save_model_as=save_model_as,
         finetuning=num_train_epochs > 0,
         finetuning_epochs=num_train_epochs,
-        finetuning_dataset="alpaca-gpt4",
+        finetuning_prune_epochs=num_prune_epochs,
+        finetuning_learning_rate=learning_rate,
+        finetuning_batch_size=train_batch_size,
+        finetuning_dataset=finetuning_dataset,
+        finetuning_dtype=training_dtype if num_train_epochs > 0 else '-',
         extra_tags=["our"] if not extra_tags else ["our"] + extra_tags.split("+"),
     )
 
     # Load the finetuned model and the corresponding tokenizer
     config, model, tokenizer = load_llama_model(
-        base_model, attention_type=attention_type, device="cuda" if IS_CUDA_AVAILABLE else "cpu"
+        base_model,
+        attention_type=attention_type,
+        device="cuda" if IS_CUDA_AVAILABLE else "cpu",
+        train_dtype=training_dtype,
     )
-
     original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
-    calibration_dataset = get_tokenized_dataset(pruning_dataset, "train", tokenizer, num_samples, 128, streaming=True)
-    train_dataset = get_tokenized_dataset("alpaca-gpt4", "train", tokenizer, streaming=False, seq_len=512)
+    calibration_dataset = get_tokenized_dataset(pruning_dataset, "train", tokenizer, 10*num_samples, 128, streaming=True)
+    train_dataset = get_tokenized_dataset(finetuning_dataset, "train", tokenizer, streaming=False, seq_len=256)
     validation_dataset = get_tokenized_dataset(
-        "wikitext2", "validation", tokenizer, seq_len=512, streaming=False, n_samples=1000, drop_empty_strings=True
+        "wikitext2", "validation", tokenizer, seq_len=256, streaming=False, n_samples=1000, drop_empty_strings=True
     )
     collate_fn = DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=8)
-
-    calibration_dataloader = DataLoader(
-        calibration_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-    )
-    print(f"Calibration dataloader: {len(calibration_dataset)} samples")
     print("Dataset loaded")
 
     # print model with sample input
@@ -168,29 +178,35 @@ def main(
     trainer_args = TrainingArguments(
         output_dir="./results/our",
         report_to="none",
-        learning_rate=1e-4,
-        weight_decay=0.001,
+        learning_rate=learning_rate,
+        weight_decay=0.01,
+        # warmup_steps=100,
         warmup_ratio=0.05,
-        gradient_accumulation_steps=1,
+        max_grad_norm=1.0,
+        gradient_accumulation_steps=64 // train_batch_size or 1,
         # max_grad_norm=0.3,
         num_train_epochs=num_train_epochs,
         optim="adamw_torch",
         auto_find_batch_size=True,
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=4,
-        group_by_length=True,
+        per_device_train_batch_size=train_batch_size,
+        per_device_eval_batch_size=2*train_batch_size,
+        # group_by_length=True,
         logging_steps=100,
         eval_steps=200 if validation_dataset else None,
         save_steps=200,
         save_total_limit=1,
         load_best_model_at_end=False,
-        fp16=IS_CUDA_AVAILABLE,
-        fp16_full_eval=IS_CUDA_AVAILABLE,
+        bf16=IS_CUDA_AVAILABLE and "bf16" in training_dtype,
+        fp16=IS_CUDA_AVAILABLE and "fp16" in training_dtype,
+        # bf16_full_eval=IS_CUDA_AVAILABLE and "bf16" in training_dtype,
+        # fp16_full_eval=IS_CUDA_AVAILABLE and "fp16" in training_dtype,
         use_mps_device=False,
         eval_strategy="steps",
         save_strategy="steps",
         eval_on_start=True,
         seed=seed,
+        gradient_checkpointing_kwargs={'use_reentrant': False},
+        ddp_find_unused_parameters=False,
     )
     pruning_callback = PruningTrainerCallback(
         target_ratio=pruning_ratio,
@@ -198,10 +214,13 @@ def main(
         strategy=how_to_collect,
         average=how_to_average,
         overlap=how_to_overlap,
-        data_loader=calibration_dataloader,
+        dataset=calibration_dataset,
+        data_collator=collate_fn,
+        num_samples=num_samples,
+        batch_size=batch_size,
         is_uniform=is_uniform,
         round_to=round_to,
-        num_epochs=num_train_epochs,  # TODO: select different epochs for pruning
+        num_epochs=num_prune_epochs,
         num_iterations=num_iterations,
         neptune_run=neptune_run,
         prune_before_training=prune_before_training,
@@ -224,6 +243,7 @@ def main(
     print("\n==================SAVE LOAD MODEL==================\n")
     # Save the trained adapters
     model = model.to(device="cpu", dtype=torch.float32)
+    model.zero_grad(set_to_none=True)
     del trainer
 
     # merge the LoRA adapters if any

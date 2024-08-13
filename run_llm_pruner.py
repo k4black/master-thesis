@@ -1,14 +1,19 @@
 import copy
+import gc
 import os
+import shutil
 import typing
 from pathlib import Path
 from typing import Optional
 
+import neptune
 import torch
 import typer
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
-
+from peft import LoraConfig, prepare_model_for_kbit_training, get_peft_model, PeftModel, LoraModel, PeftModelForCausalLM
+from transformers import AutoTokenizer, TrainingArguments, DataCollatorForLanguageModeling, Trainer, \
+    AutoModelForCausalLM
+from transformers.integrations import NeptuneCallback
 
 # from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaRMSNorm, LlamaAttention
 
@@ -36,7 +41,7 @@ from utils import (
     load_llama_model,
     neptune_record_pruned_model,
     save_model_tokenizer,
-    set_random_seed,
+    set_random_seed, get_tokenized_dataset,
 )
 
 
@@ -51,7 +56,7 @@ torch.backends.cudnn.benchmark = False
 
 def main(
     base_model: str = "huggyllama/llama-7b",
-    attention_type: Optional[str] = "sdpa",
+    attention_type: Optional[str] = None,  # "sdpa" is not supported
     pruning_ratio: float = 0.5,
     pruner_type: str = "taylor",  # l1, l2, taylor
     taylor: str = "param_first",  # vectorize, param_second, param_first, param_mix
@@ -69,6 +74,10 @@ def main(
     grouping_strategy: str = "sum",
     global_pruning: bool = False,
     num_examples: int = 10,  # number of examples to use for calibration
+    num_train_epochs: float = 0.1,
+    train_batch_size: int = 2,
+    learning_rate: float = 1e-4,
+    training_dtype: str = "fp16",  # int8, int4
     seed: int = 42,
     evaluate_on: Optional[str] = "perplexity+full+bias",
     save_model_as: Optional[str] = None,
@@ -99,6 +108,13 @@ def main(
         calibration_how_to_overlap="",
         attention_type=attention_type,
         save_model_as=save_model_as,
+        finetuning=num_train_epochs > 0,
+        finetuning_epochs=num_train_epochs,
+        finetuning_prune_epochs=0,
+        finetuning_learning_rate=learning_rate,
+        finetuning_batch_size=train_batch_size,
+        finetuning_dataset="alpaca-gpt4",
+        finetuning_dtype=training_dtype if num_train_epochs > 0 else '-',
         extra_tags=["baseline"],
     )
     pruner_type = pruner_type.lower()
@@ -110,10 +126,17 @@ def main(
         attention_type=attention_type,
         device="cuda" if IS_CUDA_AVAILABLE else "cpu",
         custom_model_cls=LlamaForCausalLM,
+        train_dtype=training_dtype,
     )
     for param in model.parameters():
         param.requires_grad_(True)
     original_model_stats, original_model_size = measure_model_stats(model, tokenizer, print_results=False)
+
+    train_dataset = get_tokenized_dataset("alpaca-gpt4", "train", tokenizer, streaming=False, seq_len=256)
+    validation_dataset = get_tokenized_dataset(
+        "wikitext2", "validation", tokenizer, seq_len=256, streaming=False, n_samples=1000, drop_empty_strings=True
+    )
+    collate_fn = DataCollatorForLanguageModeling(tokenizer, mlm=False, pad_to_multiple_of=8)
 
     # Only for building the dependency graph.
     # Any input will be fine since the computation result are not taken into consideration.
@@ -281,6 +304,102 @@ def main(
     model.config.pad_token_id = tokenizer.pad_token_id = 0
     model.config.bos_token_id = 1
     model.config.eos_token_id = 2
+
+    print("\n==================SETUP TRAINER==================\n")
+    if num_train_epochs > 0:
+        peft_config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+            init_lora_weights="olora",
+        )
+        # from peft import get_peft_model
+        model = prepare_model_for_kbit_training(model)
+        model = get_peft_model(model, peft_config, mixed=False)
+        model.print_trainable_parameters()
+
+    trainer_args = TrainingArguments(
+        output_dir="./results/llm_pruner",
+        report_to="none",
+        learning_rate=learning_rate,
+        weight_decay=0.01,
+        # warmup_steps=100,
+        warmup_ratio=0.05,
+        max_grad_norm=1.0,
+        gradient_accumulation_steps=64 // train_batch_size or 1,
+        # max_grad_norm=0.3,
+        num_train_epochs=num_train_epochs,
+        optim="adamw_torch",
+        auto_find_batch_size=True,
+        per_device_train_batch_size=train_batch_size,
+        per_device_eval_batch_size=2*train_batch_size,
+        # group_by_length=True,
+        logging_steps=100,
+        eval_steps=200 if validation_dataset else None,
+        save_steps=200,
+        save_total_limit=1,
+        load_best_model_at_end=False,
+        bf16=IS_CUDA_AVAILABLE and "bf16" in training_dtype,
+        fp16=IS_CUDA_AVAILABLE and "fp16" in training_dtype,
+        # bf16_full_eval=IS_CUDA_AVAILABLE and "bf16" in training_dtype,
+        # fp16_full_eval=IS_CUDA_AVAILABLE and "fp16" in training_dtype,
+        use_mps_device=False,
+        eval_strategy="steps",
+        save_strategy="steps",
+        eval_on_start=True,
+        seed=seed,
+        gradient_checkpointing_kwargs={'use_reentrant': False},
+        ddp_find_unused_parameters=False,
+    )
+    trainer = Trainer(
+        model=model,
+        args=trainer_args,
+        train_dataset=train_dataset,
+        eval_dataset=validation_dataset,
+        callbacks=[NeptuneCallback(run=neptune_run)],
+        data_collator=collate_fn,
+    )
+
+    print("\n==================TRAINING + FIND PRUNING==================\n")
+    # Train the model
+    trainer.train()
+    # Re-run neptune run as Trainer stops it
+    neptune_run = neptune.init_run(with_id=neptune_run._sys_id)
+
+    print("\n==================SAVE LOAD MODEL==================\n")
+    # Save the trained adapters
+    model = model.to(device="cpu", dtype=torch.float32)
+    model.zero_grad(set_to_none=True)
+    del trainer
+
+    # merge the LoRA adapters if any
+    if isinstance(model, PeftModel):
+        model.merge_and_unload()
+        if isinstance(model, PeftModelForCausalLM):
+            model = model.base_model
+        if isinstance(model, LoraModel):
+            model = model.model
+        assert not isinstance(model, PeftModel)
+
+    model.save_pretrained(f"results/llm_pruner-{neptune_run._sys_id}")
+    if IS_CUDA_AVAILABLE:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+    model = AutoModelForCausalLM.from_pretrained(
+        f"results/llm_pruner-{neptune_run._sys_id}",
+        config=config,
+        torch_dtype=torch.float32 if not IS_CUDA_AVAILABLE else torch.float16,
+        ignore_mismatched_sizes=True,
+    )
+    model = model.to(device="cuda" if IS_CUDA_AVAILABLE else "cpu")
+    # delete the old model path
+    shutil.rmtree(f"results/llm_pruner-{neptune_run._sys_id}")
 
     if evaluate_on:
         print("\n==================Evaluation after Pruning==================\n")

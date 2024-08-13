@@ -35,16 +35,20 @@ def count_flops_macs_params(
 ) -> tuple[int, int, int, int]:
     max_seq_length = max_seq_length or tokenizer.model_max_length
 
-    flops, macs, lib_params = calculate_flops(
-        model=model,
-        transformer_tokenizer=tokenizer,
-        input_shape=(batch_size, max_seq_length),
-        include_backPropagation=False,
-        print_results=False,
-        print_detailed=False,
-        output_as_string=False,
-        output_precision=4,
-    )
+    try:
+        flops, macs, lib_params = calculate_flops(
+            model=model,
+            transformer_tokenizer=tokenizer,
+            input_shape=(batch_size, max_seq_length),
+            include_backPropagation=False,
+            print_results=False,
+            print_detailed=False,
+            output_as_string=False,
+            output_precision=4,
+        )
+    except ValueError as e:
+        print("FLOPs calculation failed, using 0:", e)
+        flops, macs, lib_params = 0, 0, 0
     params = count_total_parameters(model, require_grad=None)
     zero_params = count_zero_parameters(model, require_grad=None)
     if lib_params != params:

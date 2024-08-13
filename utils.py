@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import logging
+import os
 import random
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -24,7 +26,7 @@ from transformers import (
     DataCollatorWithPadding,
     PretrainedConfig,
     PreTrainedModel,
-    PreTrainedTokenizer,
+    PreTrainedTokenizer, BitsAndBytesConfig,
 )
 
 from adaptive_pruning.utils import count_flops_macs_params
@@ -107,12 +109,16 @@ def create_neptune_run(
     finetuning_num_samples: int | None = None,
     finetuning_learning_rate: float | None = None,
     finetuning_epochs: float = 0,
+    finetuning_prune_epochs: float | None = None,
+    finetuning_dtype: str = "fp16",
     *,
     extra_tags: list[str] | None = None,
 ) -> neptune.Run:
     neptune_run = neptune.init_run(
         tags=extra_tags or [],
     )
+
+    finetuning_prune_epochs = finetuning_prune_epochs or finetuning_epochs
 
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
     device_gpu_memory = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
@@ -148,9 +154,28 @@ def create_neptune_run(
         "finetuning_num_samples": finetuning_num_samples,
         "finetuning_learning_rate": finetuning_learning_rate,
         "finetuning_epochs": finetuning_epochs,
+        "finetuning_prune_epochs": finetuning_prune_epochs,
+        "finetuning_dtype": finetuning_dtype,
     }
 
     return neptune_run
+
+
+def _process_lamini_sample(row: dict) -> dict:
+    instruction_format = inspect.cleandoc(
+        """
+        Below is an instruction that describes a task. Write a response that appropriately completes the request.
+        
+        ### Instruction:
+        {instruction}
+        
+        ### Response:
+        {response}
+        """
+    )
+    return {
+        "text": instruction_format.format(instruction=row["instruction"], response=row["response"]),
+    }
 
 
 def get_tokenized_dataset(
@@ -165,15 +190,23 @@ def get_tokenized_dataset(
 ) -> Dataset:
     if name == "bookcorpus":
         dataset_args = dict(path="bookcorpus")
+        processor = None
         field = "text"
     elif name == "wikitext2":
         dataset_args = dict(path="Salesforce/wikitext", name="wikitext-2-v1")
+        processor = None
         field = "text"
     elif name == "c4":
         dataset_args = dict(path="allenai/c4", name="en")
+        processor = None
         field = "text"
     elif name == "alpaca-gpt4":
         dataset_args = dict(path="vicgalle/alpaca-gpt4")
+        processor = None
+        field = "text"
+    elif name == "LaMini":
+        dataset_args = dict(path="MBZUAI/LaMini-instruction")
+        processor = _process_lamini_sample
         field = "text"
     else:
         raise NotImplementedError(f"Calibration dataset {name} is not supported.")
@@ -184,6 +217,9 @@ def get_tokenized_dataset(
         streaming=streaming and n_samples is not None,
         trust_remote_code=True,
     )
+
+    if processor:
+        dataset = dataset.map(processor, batched=False)
     if drop_empty_strings:
         dataset = dataset.filter(lambda x: x[field] != "")
     if n_samples:
@@ -567,26 +603,55 @@ def load_llama_model(
     attention_type: str | None = None,
     device: str = "cuda",
     custom_model_cls: type[PreTrainedModel] | None = None,
+    quantization_config: BitsAndBytesConfig | None = None,
+    train_dtype: str = "fp16",
 ) -> tuple[PretrainedConfig, PreTrainedModel, PreTrainedTokenizer]:
+    dtype = torch.float32
+    if device == "auto" and torch.cuda.is_available() or device == "cuda":
+        if train_dtype == "fp16":
+            dtype = torch.float16
+        elif train_dtype == "bf16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(f"Unknown training dtype: {train_dtype}")
+
+    local_rank = os.getenv("LOCAL_RANK")
+    device_string = "cuda:" + str(local_rank) if device == "cuda" and local_rank is not None else device
+    print('device_string', device_string)
+
     print(f"Loading model {model_name}...")
     config = AutoConfig.from_pretrained(model_name, attn_implementation=attention_type)
+    # load model
     if custom_model_cls:
-        model = custom_model_cls.from_pretrained(model_name, config=config, low_cpu_mem_usage=True)
+        model = custom_model_cls.from_pretrained(
+            model_name,
+            config=config,
+            low_cpu_mem_usage=True,
+            torch_dtype=dtype,
+            quantization_config=quantization_config,
+            device_map=torch.device(device_string),
+        )
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             config=config,
             low_cpu_mem_usage=True,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            torch_dtype=dtype,
+            quantization_config=quantization_config,
+            device_map=torch.device(device_string),
         )
-    model = model.to(device=device, non_blocking=True, dtype=torch.float16 if device == "cuda" else torch.float32)
+    # move model to device
     model.eval()
+    # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
+    tokenizer.padding_side = "left"
     print(f"Original Model: {model_name} loaded")
+    # count stats
     try:
         count_flops_macs_params(model, tokenizer, print_results=True)
     except Exception as e:
         print("!" * 512)
         print(f"Error counting flops, macs, params: {e}")
+
     return config, model, tokenizer
