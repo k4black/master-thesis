@@ -28,7 +28,7 @@ from utils import (
     load_llama_model,
     neptune_record_pruned_model,
     save_model_tokenizer,
-    set_random_seed,
+    set_random_seed, save_load_model, merge_peft_model,
 )
 
 
@@ -48,7 +48,7 @@ def main(
     # base_model: str = "huggyllama/llama-7b",
     base_model: str = "TinyLlama/TinyLlama_v1.1",
     attention_type: Optional[str] = "sdpa",
-    pruning_dataset: str = "bookcorpus",
+    pruning_dataset: str = "c4",  # c4, bookcorpus, alpaca-gpt4
     batch_size: int = 8,
     how_to_collect: str = "grads",  # grads or activations or random
     how_to_average: str = "fisher_info",  # fisher_info, sum, mean, max or entropy
@@ -80,7 +80,7 @@ def main(
         num_prune_epochs = 0
 
     if pruning_components == "all":
-        pruning_components = "attn_heads+attn_layers+ffn_neurons+ffn_layers+hidden_state"
+        pruning_components = "attn_heads+attn_layers+ffn_neurons+ffn_layers+hidden_states"
     pruning_components_list: list[str] = pruning_components.split("+")
     assert len(pruning_components), "Need to select at least one pruning method"
 
@@ -132,7 +132,7 @@ def main(
 
     # load dataset
     print(f"Loading dataset {pruning_dataset}...")
-    calibration_dataset = get_tokenized_dataset(pruning_dataset, "train", tokenizer, 10*num_samples, 128, streaming=True)
+    calibration_dataset = get_tokenized_dataset(pruning_dataset, "train", tokenizer, 10*num_samples, 128, streaming=True, drop_empty_strings=True)
     train_dataset = get_tokenized_dataset(finetuning_dataset, "train", tokenizer, streaming=False, seq_len=256)
     validation_dataset = get_tokenized_dataset(
         "wikitext2", "validation", tokenizer, seq_len=256, streaming=False, n_samples=1000, drop_empty_strings=True
@@ -187,7 +187,7 @@ def main(
         # max_grad_norm=0.3,
         num_train_epochs=num_train_epochs,
         optim="adamw_torch",
-        auto_find_batch_size=True,
+        auto_find_batch_size=False,
         per_device_train_batch_size=train_batch_size,
         per_device_eval_batch_size=2*train_batch_size,
         # group_by_length=True,
@@ -207,6 +207,8 @@ def main(
         seed=seed,
         gradient_checkpointing_kwargs={'use_reentrant': False},
         ddp_find_unused_parameters=False,
+        do_train=num_train_epochs > 0,
+        save_only_model=True,
     )
     pruning_callback = PruningTrainerCallback(
         target_ratio=pruning_ratio,
@@ -242,34 +244,19 @@ def main(
 
     print("\n==================SAVE LOAD MODEL==================\n")
     # Save the trained adapters
-    model = model.to(device="cpu", dtype=torch.float32)
-    model.zero_grad(set_to_none=True)
     del trainer
 
-    # merge the LoRA adapters if any
-    if isinstance(model, PeftModel):
-        model.merge_and_unload()
-        if isinstance(model, PeftModelForCausalLM):
-            model = model.base_model
-        if isinstance(model, LoraModel):
-            model = model.model
-        assert not isinstance(model, PeftModel)
-
-    model.save_pretrained(f"results/our-{neptune_run._sys_id}")
-    if IS_CUDA_AVAILABLE:
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
-
-    model = AutoModelForCausalLM.from_pretrained(
-        f"results/our-{neptune_run._sys_id}",
-        config=config,
-        torch_dtype=torch.float32 if not IS_CUDA_AVAILABLE else torch.float16,
+    model = model.to(device="cpu", dtype=torch.float32)
+    model.zero_grad(set_to_none=True)
+    model = merge_peft_model(
+        model,
+        merge_peft=num_train_epochs > 0,
     )
-    model = model.to(device="cuda" if IS_CUDA_AVAILABLE else "cpu")
-    # delete the old model path
-    shutil.rmtree(f"results/our-{neptune_run._sys_id}")
+    model = save_load_model(
+        f"results/our-{neptune_run._sys_id}",
+        model,
+        device="cuda" if IS_CUDA_AVAILABLE else "cpu",
+    )
 
     print("\n==================ACTUAL PRUNING==================\n")
 
@@ -284,11 +271,8 @@ def main(
     print(model)
 
     print("-" * 80)
-    if IS_CUDA_AVAILABLE:
-        # TODO: fix, next(model.parameters()).dtype float16, but error as full precision
-        model = model.to(dtype=torch.float16)
-    else:
-        model = model.to(dtype=torch.float32)
+    # TODO: fix, next(model.parameters()).dtype float16, but error as full precision
+    model = model.to(dtype=torch.float16 if IS_CUDA_AVAILABLE else torch.float32)
     pruned_model_stats, pruned_model_size = measure_model_stats(
         model, tokenizer, original_model_stats, print_results=True
     )

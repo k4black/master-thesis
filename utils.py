@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import random
+import shutil
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -16,6 +17,7 @@ import torch
 from datasets import Dataset, load_dataset
 from lm_eval.utils import make_table
 from neptune.types import File
+from peft import PeftModelForCausalLM, LoraModel, PeftModel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -655,3 +657,59 @@ def load_llama_model(
         print(f"Error counting flops, macs, params: {e}")
 
     return config, model, tokenizer
+
+
+def merge_peft_model(
+    model: PeftModel | PreTrainedModel,
+    merge_peft: bool = False,
+) -> PreTrainedModel:
+
+    if isinstance(model, PeftModel):
+        if merge_peft:
+            model.merge_and_unload()
+        else:
+            model.unload()
+        if isinstance(model, PeftModelForCausalLM):
+            model = model.base_model
+        if isinstance(model, LoraModel):
+            model = model.model
+        assert not isinstance(model, PeftModel)
+
+    return model
+
+
+def save_load_model(
+    path: str,
+    model: PreTrainedModel,
+    device: str = "cuda",
+) -> PreTrainedModel:
+    model = model.to(device="cpu", dtype=torch.float32)
+    model.zero_grad(set_to_none=True)
+
+    # merge the LoRA adapters if any
+    model = merge_peft_model(model, merge_peft=True)
+
+    # save the model
+    model.save_pretrained(path, safe_serialization=True)
+    config = model.config
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+    # load the model
+    model = AutoModelForCausalLM.from_pretrained(
+        path,
+        config=config,
+        torch_dtype=torch.float32 if not device=='cuda' else torch.float16,
+        low_cpu_mem_usage=True,
+        ignore_mismatched_sizes=True,
+    )
+    model = model.to(device=device)
+
+    # delete the old model path
+    shutil.rmtree(path)
+
+    return model

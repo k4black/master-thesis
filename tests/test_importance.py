@@ -20,7 +20,7 @@ from adaptive_pruning.importance import (
     select_to_prune_attention_heads,
     select_to_prune_attention_layers,
     select_to_prune_ffn_layers,
-    select_to_prune_ffn_neurons,
+    select_to_prune_ffn_neurons, get_components_ratios,
 )
 
 
@@ -42,10 +42,19 @@ class TestCollect:
     def test_all_collectors_random_input(
         self, collector: Callable, test_lm_model_llama: PreTrainedModel, random_lm_dataloader: DataLoader
     ) -> None:
-        result = collector(test_lm_model_llama, random_lm_dataloader)
+        result: ComponentsInfo = collector(test_lm_model_llama, random_lm_dataloader)
         assert isinstance(result, ComponentsInfo)
         for field_name, value in result._asdict().items():
             assert value.shape[0] in [1, 2, 8], field_name  # batched or full
+
+        # check samples (first dimension) are different
+        if result[0].shape[0] > 1:
+            assert not torch.allclose(result.attention_heads_info[0], result.attention_heads_info[1])
+            assert not torch.allclose(result.attention_layers_info[0], result.attention_layers_info[1])
+            assert not torch.allclose(result.ffn_neurons_info[0], result.ffn_neurons_info[1])
+            assert not torch.allclose(result.ffn_layers_info[0], result.ffn_layers_info[1])
+            assert not torch.allclose(result.hidden_states_info[0], result.hidden_states_info[1])
+            assert not torch.allclose(result.meta_info[0], result.meta_info[1])
 
 
 class TestInfoTo:
@@ -410,3 +419,38 @@ class TestSelectToPrune:
         assert 2 not in components_to_prune.ffn_layers_to_prune
         for i in [10, 20, 30]:
             assert i not in components_to_prune.hidden_states_to_prune
+
+
+# test get_components_ratios
+class TestPruningRatiosSelection:
+    POSSIBLE_COMPONENTS = ["attn_heads", "attn_layers", "ffn_neurons", "ffn_layers", "hidden_states"]
+
+    @pytest.mark.parametrize("pruning_ratio", [0.1, 0.2, 0.5, 0.8])
+    @pytest.mark.parametrize(
+        "pruning_components",
+        [
+            ["attn_heads"],
+            ["attn_layers"],
+            ["ffn_neurons"],
+            ["ffn_layers"],
+            ["hidden_states"],
+            ["attn_heads", "attn_layers", "ffn_neurons", "ffn_layers", "hidden_states"],
+        ],
+    )
+    def test_fixed_overlap(self, pruning_ratio: float, pruning_components: list[str]) -> None:
+        attn_heads_r, attn_layers_r, ffn_neurons_r, ffn_layers_r, hidden_states_r = get_components_ratios(
+            pruning_ratio, pruning_components, how_to_overlap="fixed"
+        )
+        predicted = {
+            "attn_heads": attn_heads_r,
+            "attn_layers": attn_layers_r,
+            "ffn_neurons": ffn_neurons_r,
+            "ffn_layers": ffn_layers_r,
+            "hidden_states": hidden_states_r,
+        }
+
+        for component in self.POSSIBLE_COMPONENTS:
+            if component in pruning_components:
+                assert predicted[component] == pruning_ratio, f"Component {component} should be pruned at {pruning_ratio}"
+            else:
+                assert predicted[component] == 0.0, f"Component {component} should not be pruned"

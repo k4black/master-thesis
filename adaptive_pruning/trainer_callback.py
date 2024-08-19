@@ -102,28 +102,44 @@ class PruningTrainerCallback(TrainerCallback):
         if self.num_epochs is None:
             self.num_epochs = args.num_train_epochs
 
-        if self.num_iterations == 1:
-            # only one pruning step - prune than train
-            self._pruning_step_to_pruning_ratio = {0: self.target_ratio}
-            self._max_pruning_step = 0
-        else:
-            if args.num_train_epochs or self.prune_before_training:
+        # if no training epochs or prune_before_training, prune the model at the beginning in N steps
+        if args.num_train_epochs == 0 or self.prune_before_training:
+            print("PRUNING: pruning before the training")
+            if self.num_iterations == 1:
+                self._pruning_step_to_pruning_ratio = {0: self.target_ratio}
+                self._max_pruning_step = 0
+            else:
                 share_to_prune = self.target_ratio / self.num_iterations
                 self._pruning_step_to_pruning_ratio = {i: (i + 1) * share_to_prune for i in range(self.num_iterations)}
                 self._max_pruning_step = 0
+
+        # regular pruning during the training
+        else:
+            print("PRUNING: pruning during the training")
+            if self.num_iterations == 1:
+                # prune in the middle of the training
+                self._pruning_step_to_pruning_ratio = {state.max_steps // 2: self.target_ratio}
+                self._max_pruning_step = state.max_steps // 2
             else:
                 # multiple pruning steps - prune gradually, same percent for each step
                 percent_of_pruning_epochs = self.num_epochs / args.num_train_epochs
                 max_pruning_step = int(state.max_steps * percent_of_pruning_epochs)
+                print('percent_of_pruning_epochs', max_pruning_step)
+                print('max_pruning_step', percent_of_pruning_epochs)
                 # divide the pruning into equal steps
                 if self.num_iterations > max_pruning_step:
                     self.num_iterations = max_pruning_step
-                steps_between_pruning = max_pruning_step // self.num_iterations
+                    print(f"PRUNING: reduced the number of iterations to {self.num_iterations} (max {max_pruning_step})")
+                steps_between_pruning = max_pruning_step // (self.num_iterations + 1)
                 share_to_prune = self.target_ratio / self.num_iterations
+                print('steps_between_pruning', steps_between_pruning)
+                print('share_to_prune', share_to_prune)
                 self._pruning_step_to_pruning_ratio = {
                     (i + 1) * steps_between_pruning: (i + 1) * share_to_prune for i in range(self.num_iterations)
                 }
                 self._max_pruning_step = self.num_iterations * steps_between_pruning
+                print('_pruning_step_to_pruning_ratio', self._pruning_step_to_pruning_ratio)
+                print('_max_pruning_step', self._max_pruning_step)
 
         # create masks for the model and insert the hooks
         self._fake_pruning_masks, self._fake_pruning_hooks = get_insert_pruning_masks(self._model, require_grads=False)
@@ -136,8 +152,8 @@ class PruningTrainerCallback(TrainerCallback):
             ffn_layers_to_prune=[],
             hidden_states_to_prune=[],
         )
-        print(f"PRUNING: initialized with {self.num_iterations} iterations, ")
-        print(f"PRUNING: max pruning step {self._max_pruning_step}, ")
+        print(f"PRUNING: initialized with {self.num_iterations} iterations")
+        print(f"PRUNING: max pruning step {self._max_pruning_step}")
         print(f"PRUNING: pruning schedule {self._pruning_step_to_pruning_ratio}")
 
     def _fake_prune_model(self, to_prune_target: float, round_to: int, step_id: int = 0, optimizer=None) -> None:
@@ -177,19 +193,19 @@ class PruningTrainerCallback(TrainerCallback):
         # prune the model (fake, just nullify the mask)
         if "attn_heads" in self.components:
             for layer, heads in components_to_prune.attention_heads_to_prune.items():
-                self._fake_pruning_masks["attn_heads"][layer, heads] = 0.0
+                self._fake_pruning_masks["attn_heads"][layer, heads] = 0
         if "attn_layers" in self.components:
             layers = components_to_prune.attention_layers_to_prune
-            self._fake_pruning_masks["attn_layers"][layers] = 0.0
+            self._fake_pruning_masks["attn_layers"][layers] = 0
         if "ffn_neurons" in self.components:
             for layer, neurons in components_to_prune.ffn_neurons_to_prune.items():
-                self._fake_pruning_masks["ffn_neurons"][layer, neurons] = 0.0
+                self._fake_pruning_masks["ffn_neurons"][layer, neurons] = 0
         if "ffn_layers" in self.components:
             layers = components_to_prune.ffn_layers_to_prune
-            self._fake_pruning_masks["ffn_layers"][layers] = 0.0
+            self._fake_pruning_masks["ffn_layers"][layers] = 0
         if "hidden_states" in self.components:
             states = components_to_prune.hidden_states_to_prune
-            self._fake_pruning_masks["hidden_states"][states] = 0.0
+            self._fake_pruning_masks["hidden_states"][states] = 0
 
         # update _pruned_components, extend the pruned components
         for layer, heads in components_to_prune.attention_heads_to_prune.items():
@@ -221,8 +237,9 @@ class PruningTrainerCallback(TrainerCallback):
         self._current_pruned_ratio = to_prune_target  # TODO: account for actual pruning rate (round_to)
 
         if self.neptune_run:
-            for name, value in components_info._asdict().items():
-                self.neptune_run[f"pruning/step_{step_id}_{name}"].upload(File.as_pickle(tensor_to_list(value)))
+            # TODO: uncomment info when free up space in the Neptune
+            # for name, value in components_info._asdict().items():
+            #     self.neptune_run[f"pruning/step_{step_id}_{name}"].upload(File.as_pickle(tensor_to_list(value)))
             for name, value in components_importance._asdict().items():
                 self.neptune_run[f"pruning/step_{step_id}_{name}"].upload(File.as_pickle(tensor_to_list(value)))
             for name, value in components_to_prune._asdict().items():

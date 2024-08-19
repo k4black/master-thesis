@@ -104,6 +104,8 @@ def test_tokenizer_llama(test_config_llama: PretrainedConfig) -> PreTrainedToken
     from transformers import LlamaTokenizer
 
     tokenizer = LlamaTokenizer.from_pretrained(HF_TINY_LLAMA, legacy=True)
+    tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     return tokenizer
 
@@ -241,19 +243,29 @@ def random_clf_dataloader(test_tokenizer_bert: PreTrainedTokenizer) -> DataLoade
 
 
 @pytest.fixture
-def random_lm_dataloader(test_tokenizer_bert: PreTrainedTokenizer) -> DataLoader:
+def lm_data_collator(test_tokenizer_llama: PreTrainedTokenizer) -> DataCollatorWithPadding:
+    return DataCollatorWithPadding(tokenizer=test_tokenizer_llama)
+
+
+@pytest.fixture
+def random_lm_dataset() -> Dataset:
+    return Dataset.from_list(
+        [
+            {
+                "input_ids": torch.randint(1, 100, (10,)),
+                "attention_mask": torch.randint(1, 2, (10,)),
+                "labels": torch.randint(1, 100, (10,)),
+            }
+            for _ in range(8)
+        ]
+    )
+
+
+@pytest.fixture
+def random_lm_dataloader(lm_data_collator: DataCollatorWithPadding, random_lm_dataset: Dataset) -> DataLoader:
     return DataLoader(
-        Dataset.from_list(
-            [
-                {
-                    "input_ids": torch.randint(1, 100, (10,)),
-                    "attention_mask": torch.randint(1, 2, (10,)),
-                    "labels": torch.randint(1, 100, (10,)),
-                }
-                for _ in range(8)
-            ]
-        ),
-        collate_fn=DataCollatorWithPadding(tokenizer=test_tokenizer_bert),
+        random_lm_dataset,
+        collate_fn=lm_data_collator,
         batch_size=4,
     )
 

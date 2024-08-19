@@ -238,7 +238,7 @@ def collect_mask_gradients(
 
     # Create tensors to store the gradients
     gradient_collectors = {
-        name: torch.empty((0, *mask.shape), device=model.device, dtype=model.dtype, requires_grad=False)
+        name: torch.empty((0, *mask.shape), device='cpu', dtype=model.dtype, requires_grad=False)
         for name, mask in pruning_masks.items()
     }
 
@@ -258,9 +258,9 @@ def collect_mask_gradients(
 
         for name in gradient_collectors:
             gradient_collectors[name] = torch.cat(
-                [gradient_collectors[name], pruning_masks[name].grad.detach().unsqueeze(0)], dim=0
+                [gradient_collectors[name], pruning_masks[name].grad.detach().cpu().unsqueeze(0)], dim=0
             )
-            pruning_masks[name].detach_()
+            pruning_masks[name].grad = None
 
     # clear graph, clear grads
     model.zero_grad(set_to_none=True)
@@ -288,6 +288,10 @@ def collect_mask_gradients(
 
     # disable grad
     model.train()
+
+    # back to device for gradient_collectors
+    # for name in gradient_collectors:
+    #     gradient_collectors[name] = gradient_collectors[name].to(model.device)
 
     return ComponentsInfo(
         gradient_collectors["attn_heads"].detach(),
@@ -649,6 +653,11 @@ def select_to_prune_attention_heads(
         # sort heads by importance
         importance_scores_flatten = importance_scores.view(-1)
         _, sorted_indices = importance_scores_flatten.sort()
+        # shuffle zero value indices to avoid pruning from the first layers
+        zero_value_indices = torch.nonzero(importance_scores_flatten == 0).squeeze()
+        shuffled_zero_value_indices = zero_value_indices[torch.randperm(zero_value_indices.size(0))]
+        sorted_indices[:shuffled_zero_value_indices.size(0)] = shuffled_zero_value_indices
+        # get the heads to prune
         heads_to_prune_flatten = sorted_indices[:num_heads_grouped_to_prune_total]
 
         # convert to layer-head indices
@@ -753,6 +762,11 @@ def select_to_prune_ffn_neurons(
         # sort neurons by importance
         importance_scores_flatten = importance_scores.view(-1)
         _, sorted_indices = importance_scores_flatten.sort()
+        # shuffle zero value indices to avoid pruning from the first layers
+        zero_value_indices = torch.nonzero(importance_scores_flatten == 0).squeeze()
+        shuffled_zero_value_indices = zero_value_indices[torch.randperm(zero_value_indices.size(0))]
+        sorted_indices[:shuffled_zero_value_indices.size(0)] = shuffled_zero_value_indices
+        # get the neurons to prune
         neurons_to_prune_flatten = sorted_indices[:num_neurons_to_prune]
 
         # convert to layer-neuron indices

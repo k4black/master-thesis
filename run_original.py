@@ -201,17 +201,19 @@ def main(
     )[1]
     if num_train_epochs > 0:
         model = PeftModel.from_pretrained(model=model, model_id=f"results/original-{neptune_run._sys_id}", is_trainable=False)
-        model.merge_and_unload()
         # shutil.rmtree(f"results/original-{neptune_run._sys_id}")
 
         # merge the LoRA adapters
         if isinstance(model, PeftModel):
-            model.merge_and_unload()
-        if isinstance(model, PeftModelForCausalLM):
-            model = model.base_model
-        if isinstance(model, LoraModel):
-            model = model.model
-        assert not isinstance(model, PeftModel)
+            if num_train_epochs > 0:
+                model.merge_and_unload()
+            else:
+                model.unload()
+            if isinstance(model, PeftModelForCausalLM):
+                model = model.base_model
+            if isinstance(model, LoraModel):
+                model = model.model
+            assert not isinstance(model, PeftModel)
     model = model.to(device="cuda" if IS_CUDA_AVAILABLE else "cpu", dtype=torch.float16)
 
     print("\n==================STATS==================\n")

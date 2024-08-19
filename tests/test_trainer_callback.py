@@ -1,9 +1,9 @@
 import copy
-import math
 
 import pytest
-from torch.utils.data import DataLoader
-from transformers import PretrainedConfig, PreTrainedModel, TrainerControl, TrainerState, TrainingArguments
+from datasets import Dataset
+from transformers import PretrainedConfig, PreTrainedModel, TrainerControl, TrainerState, TrainingArguments, \
+    DataCollatorWithPadding
 
 from adaptive_pruning.trainer_callback import PruningTrainerCallback
 
@@ -38,7 +38,8 @@ class TestPruningTrainerCallback:
         self,
         test_config_llama: PretrainedConfig,
         test_lm_model_llama: PreTrainedModel,
-        random_lm_dataloader: DataLoader,
+        random_lm_dataset: Dataset,
+        lm_data_collator: DataCollatorWithPadding,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
@@ -54,7 +55,10 @@ class TestPruningTrainerCallback:
             strategy="grads",
             average="fisher_info",
             overlap="fixed",
-            data_loader=random_lm_dataloader,
+            dataset=random_lm_dataset,
+            data_collator=lm_data_collator,
+            num_samples=8,
+            batch_size=4,
             num_iterations=num_iterations,
             prune_before_training=True,
             round_to=1,
@@ -93,7 +97,8 @@ class TestPruningTrainerCallback:
         self,
         test_config_llama: PretrainedConfig,
         test_lm_model_llama: PreTrainedModel,
-        random_lm_dataloader: DataLoader,
+        random_lm_dataset: Dataset,
+        lm_data_collator: DataCollatorWithPadding,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
@@ -109,7 +114,10 @@ class TestPruningTrainerCallback:
             strategy="grads",
             average="fisher_info",
             overlap="fixed",
-            data_loader=random_lm_dataloader,
+            dataset=random_lm_dataset,
+            data_collator=lm_data_collator,
+            num_samples=8,
+            batch_size=4,
             num_iterations=num_iterations,
             prune_before_training=False,
             round_to=1,
@@ -129,6 +137,19 @@ class TestPruningTrainerCallback:
             state.global_step = i
             callback.on_step_begin(args=args, state=state, control=control, model=test_lm_model_llama)
 
+            # check during training
+            if i < callback._max_pruning_step:
+                assert sum(len(heads) for heads in callback.pruning_components.attention_heads_to_prune.values()) < int(
+                    total_heads * 0.5
+                )
+                assert len(callback.pruning_components.attention_layers_to_prune) == 0
+                assert sum(len(layers) for layers in callback.pruning_components.ffn_neurons_to_prune.values()) < int(
+                    total_neurons * 0.5
+                )
+                assert len(callback.pruning_components.ffn_layers_to_prune) == 0
+                assert len(callback.pruning_components.hidden_states_to_prune) < int(total_states * 0.5)
+
+        # check after training
         assert sum(len(heads) for heads in callback.pruning_components.attention_heads_to_prune.values()) == int(
             total_heads * 0.5
         )
@@ -142,6 +163,8 @@ class TestPruningTrainerCallback:
         # end of training
         callback.on_train_end(args=args, state=state, control=control, model=test_lm_model_llama)
 
+        assert False
+
     @pytest.mark.parametrize("num_iterations", [1, 2, 4, 16, 32])
     @pytest.mark.parametrize("round_to", [1, 2, 4, 8, 16])
     @pytest.mark.parametrize("is_uniform", [False, True])
@@ -149,7 +172,8 @@ class TestPruningTrainerCallback:
         self,
         test_config_llama: PretrainedConfig,
         test_lm_model_llama: PreTrainedModel,
-        random_lm_dataloader: DataLoader,
+        random_lm_dataset: Dataset,
+        lm_data_collator: DataCollatorWithPadding,
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
@@ -169,7 +193,10 @@ class TestPruningTrainerCallback:
             strategy="grads",
             average="fisher_info",
             overlap="fixed",
-            data_loader=random_lm_dataloader,
+            dataset=random_lm_dataset,
+            data_collator=lm_data_collator,
+            num_samples=8,
+            batch_size=4,
             num_iterations=num_iterations,
             prune_before_training=False,
             round_to=round_to,

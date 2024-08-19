@@ -41,7 +41,7 @@ from utils import (
     load_llama_model,
     neptune_record_pruned_model,
     save_model_tokenizer,
-    set_random_seed, get_tokenized_dataset,
+    set_random_seed, get_tokenized_dataset, save_load_model, merge_peft_model,
 )
 
 
@@ -353,6 +353,8 @@ def main(
         seed=seed,
         gradient_checkpointing_kwargs={'use_reentrant': False},
         ddp_find_unused_parameters=False,
+        do_train=num_train_epochs > 0,
+        save_only_model=True,
     )
     trainer = Trainer(
         model=model,
@@ -364,43 +366,29 @@ def main(
     )
 
     print("\n==================TRAINING + FIND PRUNING==================\n")
-    # Train the model
-    trainer.train()
-    # Re-run neptune run as Trainer stops it
-    neptune_run = neptune.init_run(with_id=neptune_run._sys_id)
+    if num_train_epochs > 0:
+        # Train the model
+        trainer.train()
+        # Re-run neptune run as Trainer stops it
+        neptune_run = neptune.init_run(with_id=neptune_run._sys_id)
 
     print("\n==================SAVE LOAD MODEL==================\n")
     # Save the trained adapters
-    model = model.to(device="cpu", dtype=torch.float32)
-    model.zero_grad(set_to_none=True)
     del trainer
 
-    # merge the LoRA adapters if any
-    if isinstance(model, PeftModel):
-        model.merge_and_unload()
-        if isinstance(model, PeftModelForCausalLM):
-            model = model.base_model
-        if isinstance(model, LoraModel):
-            model = model.model
-        assert not isinstance(model, PeftModel)
-
-    model.save_pretrained(f"results/llm_pruner-{neptune_run._sys_id}")
-    if IS_CUDA_AVAILABLE:
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
-
-    model = AutoModelForCausalLM.from_pretrained(
-        f"results/llm_pruner-{neptune_run._sys_id}",
-        config=config,
-        torch_dtype=torch.float32 if not IS_CUDA_AVAILABLE else torch.float16,
-        ignore_mismatched_sizes=True,
+    model = model.to(device="cpu", dtype=torch.float32)
+    model.zero_grad(set_to_none=True)
+    model = merge_peft_model(
+        model,
+        merge_peft=num_train_epochs > 0,
     )
-    model = model.to(device="cuda" if IS_CUDA_AVAILABLE else "cpu")
-    # delete the old model path
-    shutil.rmtree(f"results/llm_pruner-{neptune_run._sys_id}")
+    # model = save_load_model(
+    #     f"results/llm_pruner-{neptune_run._sys_id}",
+    #     model,
+    #     device="cuda" if IS_CUDA_AVAILABLE else "cpu",
+    # )
 
+    print("\n==================AFTER TRAINING==================\n")
     if evaluate_on:
         print("\n==================Evaluation after Pruning==================\n")
         eval_results = evaluate_model(
